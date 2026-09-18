@@ -2,6 +2,30 @@
 
 CPU-only edge registration for the SEMICON India hackathon.
 
+## Project view
+
+| Phase 2: SEM → SEM | Phase 3: CAD → SEM |
+|---|---|
+| ![Phase 2 edge registration](assets/phase2-overview.svg) | ![Phase 3 CAD registration](assets/phase3-overview.svg) |
+| **Measured results** | **Work status** |
+| ![Measured results](assets/measured-results.svg) | ![Completed work and next fixes](assets/work-status.svg) |
+
+- **Done:** edge detection, scale/rotation proposal, multi-peak translation,
+  continuous subpixel refinement, confidence, no-match output, Phase 3
+  layer-aware CAD matching, and exact judge CSV handling.
+- **Working well:** zero execution failures on both 25-pair runs; Phase 2
+  measured subtotal `72.9838/85`; Phase 3 placed all 24 generated positives
+  within two pixels.
+- **Weak now:** Phase 2 harsh degradation can lose or reject correct
+  candidates; Phase 3 accepts difficult no-match pairs and its bounded vector
+  voting is biased by polygon traversal order.
+- **Next:** remove Phase 3 vote-order bias, add independent negative evidence,
+  fuse vector and image candidates, then improve Phase 2 candidate retention
+  and recalibrate confidence.
+
+Detailed measurements and algorithms are in
+[FINDINGS_AND_PROCESS.md](FINDINGS_AND_PROCESS.md).
+
 ## Install
 
 ```bash
