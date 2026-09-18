@@ -22,6 +22,8 @@ from .cadref import REFERENCE_SIZE_NM, rasterize_layer_masks, read_gds_geometry
 NOMINAL_SCALE = 10.0
 MAX_CANDIDATES = 18
 MAX_LAYERS = 32
+MIN_VECTOR_COVERAGE = 0.04
+MAX_VECTOR_PAIRS = 500_000
 
 
 @dataclass(frozen=True)
@@ -207,49 +209,91 @@ def _vector_cad_proposal_candidates(reference_gds_path: str | Path,
         for points in polygons:
             search_index[(layer_key, _polygon_signature(points))].append(points.mean(axis=0))
 
-    votes: dict[tuple[int, int], dict[str, object]] = {}
-    matchable_reference_count = 0
-    matchable_layers: set[tuple[int, int]] = set()
-    max_pairs = 500_000
-    used_pairs = 0
+    reference_index: dict[tuple, list[np.ndarray]] = defaultdict(list)
     for layer_key, polygons in reference.polygons.items():
         for points in polygons:
-            matches = search_index.get((layer_key, _polygon_signature(points)), ())
-            if not matches:
-                continue
-            matchable_reference_count += 1
-            matchable_layers.add(layer_key)
-            anchor = points.mean(axis=0)
-            for search_anchor in matches:
-                if used_pairs >= max_pairs:
-                    break
-                delta = np.asarray(search_anchor) - anchor
-                key = (int(round(float(delta[0]) * 10.0)),
-                       int(round(float(delta[1]) * 10.0)))  # 0.1 nm bins
-                record = votes.setdefault(key, {"count": 0, "layers": set()})
-                record["count"] = int(record["count"]) + 1
-                record["layers"].add(layer_key)
-                used_pairs += 1
-            if used_pairs >= max_pairs:
-                break
-        if used_pairs >= max_pairs:
+            reference_index[(layer_key, _polygon_signature(points))].append(
+                points.mean(axis=0)
+            )
+    for anchors in search_index.values():
+        anchors.sort(key=lambda point: (float(point[0]), float(point[1])))
+    for anchors in reference_index.values():
+        anchors.sort(key=lambda point: (float(point[0]), float(point[1])))
+
+    # First pass: form a bounded, deterministic proposal set.  Give every
+    # matching signature a quota before spending the remainder, with rare
+    # signatures first.  Evenly spaced samples cover the whole Cartesian
+    # product, so neither GDS polygon order nor a dense repeated shape can
+    # monopolise the pair budget.
+    groups = [(key, reference_index[key], search_index[key])
+              for key in reference_index.keys() & search_index.keys()]
+    groups.sort(key=lambda item: (len(item[1]) * len(item[2]), repr(item[0])))
+    votes: dict[tuple[int, int], float] = defaultdict(float)
+    remaining_budget = MAX_VECTOR_PAIRS
+    for group_number, (_key, reference_anchors, search_anchors) in enumerate(groups):
+        pair_count = len(reference_anchors) * len(search_anchors)
+        groups_left = len(groups) - group_number
+        quota = min(pair_count, remaining_budget // max(groups_left, 1))
+        if quota <= 0:
             break
-    if not votes or not matchable_reference_count:
+        if quota == pair_count:
+            pair_indices = range(pair_count)
+        else:
+            pair_indices = (min(pair_count - 1,
+                                ((2 * index + 1) * pair_count) // (2 * quota))
+                            for index in range(quota))
+        weight = 1.0 / quota
+        search_count = len(search_anchors)
+        for pair_index in pair_indices:
+            reference_anchor = reference_anchors[pair_index // search_count]
+            search_anchor = search_anchors[pair_index % search_count]
+            delta = np.asarray(search_anchor) - reference_anchor
+            key = (int(round(float(delta[0]) * 10.0)),
+                   int(round(float(delta[1]) * 10.0)))  # 0.1 nm bins
+            votes[key] += weight
+        remaining_budget -= quota
+
+    total_reference_count = sum(len(polygons)
+                                for polygons in reference.polygons.values())
+    if not votes or not total_reference_count:
         return []
 
-    proposals = []
-    layer_denominator = max(len(matchable_layers), 1)
+    # Second pass: verify retained deltas against every reference polygon.
+    # Counts are one-to-one within each signature and centroid bin: duplicate
+    # search polygons cannot explain a reference more than once, and one
+    # search polygon cannot explain several coincident references.
+    retained = sorted(votes, key=lambda key: (-votes[key], key))[
+        :MAX_CANDIDATES * 8
+    ]
+    proposals_by_position: dict[tuple[int, int], float] = {}
     max_left = width - int(round(REFERENCE_SIZE_NM / scale))
     max_top = height - int(round(REFERENCE_SIZE_NM / scale))
-    for (dx_bin, dy_bin), record in votes.items():
+    for dx_bin, dy_bin in retained:
         left = dx_bin / (10.0 * scale)
         top = dy_bin / (10.0 * scale)
         if not (0.0 <= left <= max_left and 0.0 <= top <= max_top):
             continue
-        support = min(int(record["count"]) / matchable_reference_count, 1.0)
-        layer_support = len(record["layers"]) / layer_denominator
-        score = float(np.clip(0.75 * support + 0.25 * layer_support, 0.0, 1.0))
-        proposals.append((int(round(top)), int(round(left)), score))
+        matched = 0
+        for signature, reference_anchors in reference_index.items():
+            search_anchors = search_index.get(signature)
+            if not search_anchors:
+                continue
+            available: dict[tuple[int, int], int] = defaultdict(int)
+            for anchor in search_anchors:
+                available[(int(round(float(anchor[0]) * 10.0)),
+                           int(round(float(anchor[1]) * 10.0)))] += 1
+            for anchor in reference_anchors:
+                expected = (int(round(float(anchor[0]) * 10.0)) + dx_bin,
+                            int(round(float(anchor[1]) * 10.0)) + dy_bin)
+                if available.get(expected, 0) > 0:
+                    matched += 1
+                    available[expected] -= 1
+        score = float(np.clip(matched / total_reference_count, 0.0, 1.0))
+        position = (int(round(top)), int(round(left)))
+        proposals_by_position[position] = max(proposals_by_position.get(position, 0.0),
+                                              score)
+    proposals = [(row, col, score)
+                 for (row, col), score in proposals_by_position.items()]
     proposals.sort(key=lambda item: item[2], reverse=True)
     return proposals[:MAX_CANDIDATES // 2]
 
@@ -474,11 +518,29 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
     image_candidates = _proposal_candidates(search_edges, template, search)
     raw_candidates = [(row, col, proposal, 0.0)
                       for row, col, proposal in image_candidates]
+    vector_coverage: float | None = None
     if search_gds_path is not None:
-        cad_candidates = _cad_proposal_candidates(
-            search_gds_path, template, search.shape,
-            reference_gds_path=gds_path, scale=scale,
-        )
+        vector_searched = True
+        try:
+            cad_candidates = _vector_cad_proposal_candidates(
+                gds_path, search_gds_path, search.shape, scale
+            )
+        except (OSError, ValueError):
+            cad_candidates = []
+            vector_searched = False
+        if cad_candidates:
+            vector_coverage = max(score for _row, _col, score in cad_candidates)
+        else:
+            if vector_searched:
+                # A legal search-side layout was read and exhaustively voted,
+                # and the reference geometry explains no in-bounds translation.
+                # That is positive evidence of ABSENCE, not missing evidence:
+                # publishing None here would discard the strongest available
+                # negative observation and fall back to the weak image gate.
+                vector_coverage = 0.0
+            cad_candidates = _raster_cad_proposal_candidates(
+                search_gds_path, template, search.shape
+            )
         combined = ([(row, col, score, score)
                      for row, col, score in cad_candidates] + raw_candidates)
         deduplicated: list[tuple[int, int, float, float]] = []
@@ -505,10 +567,16 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
         # layer visibility and later presence rejection, but it must not let a
         # photometrically convincing periodic alias displace a translation
         # supported independently by the CAD polygons.
-        order_value = lambda item: (0.35 * item.fit +
-                                    0.10 * item.appearance_corr +
-                                    0.05 * item.proposal +
-                                    0.50 * item.geometry_support)
+        # When exact vector geometry is available, coverage is the primary
+        # location statistic.  SEM appearance only breaks ties between
+        # geometrically equivalent periodic placements.  A weighted sum let
+        # a visually plausible image-only alias displace an exact, but faint,
+        # boundary placement.
+        order_value = lambda item: (
+            item.geometry_support,
+            0.70 * item.fit + 0.20 * item.appearance_corr +
+            0.10 * item.proposal,
+        )
     else:
         order_value = lambda item: (0.58 * item.fit +
                                     0.27 * item.appearance_corr +
@@ -526,7 +594,24 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
     ambiguity = 0.55 + 0.45 * float(np.clip(ambiguity_margin / 0.10, 0.0, 1.0))
     layer_support = 0.75 + 0.25 * min(best.visible_layers, 3) / 3.0
     confidence = float(np.clip(evidence * ambiguity * layer_support, 0.0, 1.0))
-    found = int(best.fit >= 0.20 and best.edge_corr >= 0.06 and best.proposal >= 0.04)
+    if vector_coverage is not None:
+        geometry_quality = float(np.clip(
+            (vector_coverage - MIN_VECTOR_COVERAGE) /
+            max(0.10 - MIN_VECTOR_COVERAGE, 1e-6), 0.0, 1.0
+        ))
+        confidence = float(np.clip(
+            0.80 * geometry_quality + 0.20 * confidence, 0.0, 1.0
+        ))
+        # Exact full-canvas design geometry is independent evidence. Once its
+        # support uses the honest denominator above, it can safely recover
+        # low-dose or invisible-layer positives whose SEM appearance falls
+        # below the image-only thresholds, while isolated polygon coincidences
+        # remain below the existing 0.04 support floor.
+        found = int(best.geometry_support >= MIN_VECTOR_COVERAGE and
+                    vector_coverage >= MIN_VECTOR_COVERAGE)
+    else:
+        found = int(best.fit >= 0.20 and best.edge_corr >= 0.06 and
+                    best.proposal >= 0.04)
     if not found:
         return {"x": 0.0, "y": 0.0, "theta": 0.0, "scale": 0.0,
                 "found": 0, "score": confidence}

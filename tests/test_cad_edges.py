@@ -11,6 +11,7 @@ import pytest
 import phase3
 from driftforge.cad_edges import (
     _cad_proposal_candidates,
+    _vector_cad_proposal_candidates,
     load_layered_template,
     solve_cad_edges,
 )
@@ -176,6 +177,91 @@ def test_full_canvas_cad_proposal_recovers_translation_and_numeric_nm_units(
     assert (col, row) == pytest.approx(expected, abs=1)
     assert score > 0.95
     assert read_gds_geometry(search_gds, window_nm=10_000).unit_mode == "numeric-nm"
+
+
+def test_vector_coverage_uses_all_reference_polygons(tmp_path: Path) -> None:
+    reference_library = gdstk.Library()
+    reference_cell = gdstk.Cell("REFERENCE_COVERAGE")
+    search_library = gdstk.Library()
+    search_cell = gdstk.Cell("SEARCH_COVERAGE")
+
+    for index in range(100):
+        width = 10.0 + index
+        points = np.array(((0.0, 0.0), (width, 0.0),
+                           (width, 12.0), (0.0, 12.0)))
+        reference_cell.add(gdstk.Polygon(points + (50.0, index * 8.0),
+                                         layer=2))
+        if index == 0:
+            # Duplicate search polygons at the same centroid must still
+            # explain only one reference polygon, not inflate coverage.
+            for _duplicate in range(10):
+                search_cell.add(gdstk.Polygon(points + (2050.0, 3000.0),
+                                              layer=2))
+
+    search_cell.add(gdstk.rectangle((5, 5), (15, 15), layer=31))
+    search_cell.add(gdstk.rectangle((9980, 9980), (9990, 9990), layer=31))
+    reference_library.add(reference_cell)
+    search_library.add(search_cell)
+    reference_path = tmp_path / "coverage_reference.gds"
+    search_path = tmp_path / "coverage_search.gds"
+    reference_library.write_gds(str(reference_path))
+    search_library.write_gds(str(search_path))
+
+    candidates = _vector_cad_proposal_candidates(
+        reference_path, search_path, (1000, 1000), 10.0
+    )
+    assert candidates
+    assert candidates[0][2] == pytest.approx(0.01)
+    assert candidates[0][2] < 0.04
+
+
+def _write_dense_vector_pair(directory: Path, *, reverse: bool) -> tuple[Path, Path]:
+    """A repeated signature exceeds the pair cap; one rare shape is last."""
+    offset = np.array((2400.0, 3600.0))
+    common = []
+    for index in range(800):
+        x = 20.0 + (index % 40) * 20.0
+        y = 20.0 + (index // 40) * 20.0
+        common.append(np.array(((x, y), (x + 6.0, y),
+                                (x + 6.0, y + 4.0), (x, y + 4.0))))
+    rare = np.array(((873.0, 811.0), (901.0, 817.0), (882.0, 849.0)))
+    polygons = [(2, points) for points in common] + [(9, rare)]
+    if reverse:
+        polygons.reverse()
+
+    reference_library = gdstk.Library()
+    reference_cell = gdstk.Cell(f"DENSE_REFERENCE_{int(reverse)}")
+    search_library = gdstk.Library()
+    search_cell = gdstk.Cell(f"DENSE_SEARCH_{int(reverse)}")
+    for layer, points in polygons:
+        reference_cell.add(gdstk.Polygon(points, layer=layer))
+        search_cell.add(gdstk.Polygon(points + offset, layer=layer))
+    reference_library.add(reference_cell)
+    search_library.add(search_cell)
+    reference_path = directory / f"dense_reference_{int(reverse)}.gds"
+    search_path = directory / f"dense_search_{int(reverse)}.gds"
+    reference_library.write_gds(str(reference_path))
+    search_library.write_gds(str(search_path))
+    return reference_path, search_path
+
+
+def test_vector_votes_are_order_invariant_beyond_pair_cap(tmp_path: Path) -> None:
+    forward = _write_dense_vector_pair(tmp_path, reverse=False)
+    reversed_pair = _write_dense_vector_pair(tmp_path, reverse=True)
+
+    forward_candidates = _vector_cad_proposal_candidates(
+        *forward, (1000, 1000), 10.0
+    )
+    reversed_candidates = _vector_cad_proposal_candidates(
+        *reversed_pair, (1000, 1000), 10.0
+    )
+
+    assert forward_candidates
+    assert reversed_candidates
+    assert forward_candidates[0][:2] == (360, 240)
+    assert reversed_candidates[0][:2] == (360, 240)
+    assert forward_candidates[0][2] == pytest.approx(1.0)
+    assert reversed_candidates[0] == pytest.approx(forward_candidates[0])
 
 
 def test_cli_routes_search_gds_without_reading_training_json(

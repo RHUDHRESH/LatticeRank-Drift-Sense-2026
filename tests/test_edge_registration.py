@@ -11,9 +11,13 @@ from PIL import Image
 
 from driftforge.edge_registration import (
     _Candidate,
+    _PoseProposal,
     EdgeConfig,
     EdgeResult,
+    _add_scale_boundary_proposals,
     _make_template,
+    _polarity_insensitive_orientation_agreement,
+    _select_refinement_candidates,
     _source_verified,
     _surface_peaks,
     solve_edges,
@@ -152,6 +156,53 @@ def test_manual_paste_oracle_has_half_pixel_centre() -> None:
     assert actual_y == expected_y
 
 
+def test_refinement_admission_reserves_each_pose_before_more_aliases() -> None:
+    candidates = [
+        _Candidate(
+            x=float(20 + 12 * index), y=20.0, scale=9.0, theta=-2.0,
+            correlation=0.95 - 0.01 * index, pose_confidence=0.8,
+            source="descriptor_ransac",
+        )
+        for index in range(8)
+    ]
+    candidates.extend([
+        _Candidate(
+            x=150.0, y=90.0, scale=10.2, theta=1.5,
+            correlation=0.70, pose_confidence=0.3,
+            source="directional_spectrum",
+        ),
+        _Candidate(
+            x=260.0, y=180.0, scale=10.0, theta=0.0,
+            correlation=0.65, pose_confidence=0.2,
+            source="orientation_nominal",
+        ),
+    ])
+    config = EdgeConfig(max_refine_candidates=4)
+
+    selected = _select_refinement_candidates(candidates, config)
+
+    assert len(selected) == 4
+    assert {item.source for item in selected[:3]} == {
+        "descriptor_ransac", "directional_spectrum", "orientation_nominal",
+    }
+    assert selected[3].source == "descriptor_ransac"
+
+
+def test_near_endpoint_pose_gets_fresh_boundary_template_proposal() -> None:
+    proposal = _PoseProposal(
+        scale=8.31, theta=-1.1, confidence=0.20,
+        source="directional_spectrum",
+    )
+
+    expanded = _add_scale_boundary_proposals([proposal], EdgeConfig())
+
+    assert len(expanded) == 2
+    assert expanded[1].scale == 8.0
+    assert expanded[1].theta == proposal.theta
+    assert expanded[1].source == "directional_spectrum_scale_boundary"
+    assert expanded[1].confidence == proposal.confidence
+
+
 def test_template_pyramid_area_integrates_subpixel_checkerboard() -> None:
     """Independent anti-alias oracle; warpAffine AREA does not integrate."""
     yy, xx = np.indices((800, 800))
@@ -186,8 +237,9 @@ def test_result_mapping_contains_public_contract_fields() -> None:
 @pytest.mark.parametrize(
     ("correlation", "gap", "expected"),
     [
-        (0.74, 0.01, True),   # strong absolute agreement can be periodic
-        (0.62, 0.12, True),   # moderate agreement needs spatial isolation
+        (0.74, 0.01, False),  # strong but repeated-layout alias
+        (0.74, 0.06, True),   # strong agreement with modest isolation
+        (0.52, 0.12, True),   # moderate agreement needs spatial isolation
         (0.65, 0.04, False),  # moderate repeated-layout alias
         (0.45, 0.20, False),  # isolated but weak edge coincidence
     ],
@@ -201,3 +253,39 @@ def test_spectral_presence_requires_strong_or_isolated_edge_evidence(
         source="directional_spectrum",
     )
     assert _source_verified(candidate, correlation, gap, EdgeConfig()) is expected
+
+
+def test_degraded_spectral_match_uses_independent_orientation_evidence() -> None:
+    candidate = _Candidate(
+        x=10.0, y=10.0, scale=10.0, theta=0.0,
+        correlation=0.38, pose_confidence=0.16,
+        source="directional_spectrum", orientation_agreement=0.20,
+    )
+    assert _source_verified(candidate, 0.38, 0.06, EdgeConfig())
+
+
+def test_synthetic_scale_boundary_requires_extra_isolation() -> None:
+    candidate = _Candidate(
+        x=10.0, y=10.0, scale=8.0, theta=0.0,
+        correlation=0.68, pose_confidence=0.16,
+        source="directional_spectrum_scale_boundary",
+        orientation_agreement=0.50,
+    )
+    assert not _source_verified(candidate, 0.68, 0.09, EdgeConfig())
+    assert _source_verified(candidate, 0.68, 0.13, EdgeConfig())
+
+
+def test_orientation_agreement_is_polarity_insensitive_and_discriminative() -> None:
+    image = np.zeros((96, 96), dtype=np.float32)
+    cv2.rectangle(image, (18, 25), (74, 68), 1.0, -1)
+    cv2.line(image, (20, 80), (78, 12), 0.6, 4)
+    inverted = 1.0 - image
+    rotated = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+
+    same = _polarity_insensitive_orientation_agreement(image, image)
+    opposite_polarity = _polarity_insensitive_orientation_agreement(image, inverted)
+    different_orientation = _polarity_insensitive_orientation_agreement(image, rotated)
+
+    assert same > 0.95
+    assert opposite_polarity > 0.95
+    assert different_orientation < 0.35

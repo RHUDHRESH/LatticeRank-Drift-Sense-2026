@@ -20,7 +20,7 @@ accepted by :func:`driftforge.pose.build_template`.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import os
 from typing import Any
 
@@ -66,7 +66,10 @@ class EdgeConfig:
     spectral_angle_samples: int = 41
     spectral_proposals_per_axis: int = 2
     max_pose_proposals: int = 5
-    peaks_per_pose: int = 4
+    # Keep enough spatially separated aliases for periodic layouts.  The
+    # downstream refinement budget remains fixed, so this increases proposal
+    # recall without increasing the number of continuous optimizations.
+    peaks_per_pose: int = 8
     # At least one site from every retained pose can reach continuous
     # refinement.  Otherwise several high harmonic aliases can fill a global
     # top-3 and prevent the nominal seed from ever correcting its scale.
@@ -141,6 +144,7 @@ class _Candidate:
     matches: int = 0
     inliers: int = 0
     intensity_correlation: float = -1.0
+    orientation_agreement: float = 0.0
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -469,6 +473,35 @@ def _deduplicate_proposals(proposals: list[_PoseProposal], config: EdgeConfig) -
     return kept
 
 
+def _add_scale_boundary_proposals(
+    proposals: list[_PoseProposal], config: EdgeConfig,
+) -> list[_PoseProposal]:
+    """Add exact disclosed scale endpoints near an uncertain proposal.
+
+    Template support changes with scale.  A continuous optimizer whose patch
+    shape was created from an approximate seed cannot reliably move onto an
+    8x or 12x endpoint.  Rendering a fresh endpoint template is cheap and
+    gives spatial correlation the correct support before local refinement.
+    """
+    expanded = list(proposals)
+    for proposal in proposals:
+        for boundary in (config.scale_min, config.scale_max):
+            if not (0.05 < abs(proposal.scale - boundary) <= 0.50):
+                continue
+            candidate = replace(
+                proposal,
+                scale=float(boundary),
+                confidence=float(proposal.confidence),
+                source=f"{proposal.source}_scale_boundary",
+            )
+            if any(abs(candidate.scale - old.scale) < 0.05
+                   and abs(candidate.theta - old.theta) < 0.25
+                   for old in expanded):
+                continue
+            expanded.append(candidate)
+    return expanded
+
+
 def _warp_template_pixels(
     reference_gray: np.ndarray,
     scale: float,
@@ -577,6 +610,54 @@ def _spatial_candidates(
     return candidates, surfaces
 
 
+def _select_refinement_candidates(
+    candidates: list[_Candidate],
+    config: EdgeConfig,
+) -> list[_Candidate]:
+    """Round-robin distinct pose modes into the bounded refinement budget.
+
+    Correlation surfaces already apply spatial NMS within each pose.  Taking
+    candidates in global source order can nevertheless spend the entire
+    budget on aliases from one pose before a weaker, correct pose is seen.
+    Grouping by source and pose, then taking one candidate from every group
+    per pass preserves those alternatives while retaining correlation order
+    within each surface.
+    """
+    groups: list[list[_Candidate]] = []
+    for candidate in candidates:
+        for group in groups:
+            head = group[0]
+            if (candidate.source == head.source
+                    and abs(candidate.scale - head.scale) < 0.15
+                    and abs(candidate.theta - head.theta) < 0.35):
+                group.append(candidate)
+                break
+        else:
+            groups.append([candidate])
+
+    selected: list[_Candidate] = []
+    depth = 0
+    while len(selected) < config.max_refine_candidates:
+        added = False
+        for group in groups:
+            if depth >= len(group):
+                continue
+            candidate = group[depth]
+            if all(np.hypot(candidate.x - old.x, candidate.y - old.y) >= 2.0
+                   or abs(candidate.scale - old.scale) >= 0.15
+                   or abs(candidate.theta - old.theta) >= 0.35
+                   or candidate.source != old.source
+                   for old in selected):
+                selected.append(candidate)
+                added = True
+                if len(selected) >= config.max_refine_candidates:
+                    break
+        if not added and all(depth >= len(group) - 1 for group in groups):
+            break
+        depth += 1
+    return selected
+
+
 def _zncc(left: np.ndarray, right: np.ndarray) -> float:
     a = left.astype(np.float32).ravel()
     b = right.astype(np.float32).ravel()
@@ -586,6 +667,36 @@ def _zncc(left: np.ndarray, right: np.ndarray) -> float:
     if denominator <= 1e-9:
         return -1.0
     return float(np.dot(a, b) / denominator)
+
+
+def _polarity_insensitive_orientation_agreement(
+    left: np.ndarray,
+    right: np.ndarray,
+) -> float:
+    """Return edge-weighted gradient agreement, ignoring contrast polarity.
+
+    Goshtasby's gradient-direction matching treats orientation as independent
+    verification of an intensity or edge match.  Taking the absolute dot
+    product makes bright-on-dark and dark-on-bright boundaries equivalent.
+    The returned value is normalized so unrelated orientations (whose expected
+    absolute cosine is ``2 / pi``) score near zero.
+    """
+    left32 = left.astype(np.float32, copy=False)
+    right32 = right.astype(np.float32, copy=False)
+    lx = cv2.Scharr(left32, cv2.CV_32F, 1, 0)
+    ly = cv2.Scharr(left32, cv2.CV_32F, 0, 1)
+    rx = cv2.Scharr(right32, cv2.CV_32F, 1, 0)
+    ry = cv2.Scharr(right32, cv2.CV_32F, 0, 1)
+    lm = cv2.magnitude(lx, ly)
+    rm = cv2.magnitude(rx, ry)
+    weights = np.minimum(lm, rm)
+    valid = weights > max(float(np.percentile(weights, 55.0)), 1e-6)
+    if int(np.count_nonzero(valid)) < 16:
+        return 0.0
+    cosine = np.abs((lx * rx + ly * ry) / np.maximum(lm * rm, 1e-12))
+    raw = float(np.average(cosine[valid], weights=weights[valid]))
+    random_baseline = 2.0 / np.pi
+    return float(np.clip((raw - random_baseline) / (1.0 - random_baseline), 0.0, 1.0))
 
 
 def _refine_candidate(
@@ -654,12 +765,15 @@ def _refine_candidate(
         search_gray, (shape[1], shape[0]),
         (float(values[0]), float(values[1])))
     intensity_correlation = _zncc(intensity_patch, intensity_template)
+    orientation_agreement = _polarity_insensitive_orientation_agreement(
+        intensity_patch, intensity_template)
     return _Candidate(
         x=float(values[0]), y=float(values[1]), theta=float(values[2]),
         scale=float(values[3]), correlation=correlation,
         pose_confidence=candidate.pose_confidence, source=candidate.source,
         matches=candidate.matches, inliers=candidate.inliers,
         intensity_correlation=intensity_correlation,
+        orientation_agreement=orientation_agreement,
     )
 
 
@@ -680,26 +794,45 @@ def _source_verified(candidate: _Candidate, correlation: float, gap: float,
                      config: EdgeConfig) -> bool:
     """Require independent geometric or spatial evidence for presence.
 
-    A repeated layout can give two nearly equal sites even when the target is
-    present, so sufficiently strong absolute edge agreement is useful by
-    itself. At moderate agreement, require a clearly isolated spatial peak.
+    A repeated layout can give high absolute correlation at an unrelated
+    periodic site.  Spectral proposals therefore always need at least modest
+    spatial isolation; moderate correlations need a larger margin.
     """
-    strong_edge_agreement = correlation >= 0.72
-    isolated_edge_agreement = correlation >= 0.58 and gap >= 0.10
+    strong_edge_agreement = correlation >= 0.72 and gap >= 0.05
+    isolated_edge_agreement = correlation >= 0.47 and gap >= 0.10
+    orientation_verified = (
+        correlation >= 0.47 and gap >= 0.05
+        and candidate.orientation_agreement >= 0.18
+    )
+    degraded_edge_agreement = (
+        correlation >= 0.35 and gap >= 0.05
+        and candidate.orientation_agreement >= 0.18
+    )
     if candidate.source == "descriptor_ransac":
         return bool(
             candidate.inliers >= config.min_ransac_inliers
             and correlation >= 0.30
         )
-    if candidate.source == "directional_spectrum":
+    if candidate.source.endswith("_scale_boundary"):
+        boundary_verified = (
+            (correlation >= 0.80 and gap >= 0.05)
+            or (correlation >= 0.35 and gap >= 0.12)
+        )
         return bool(
             candidate.pose_confidence >= config.min_pose_confidence
-            and (strong_edge_agreement or isolated_edge_agreement)
+            and boundary_verified
         )
-    if candidate.source == "orientation_nominal":
+    if candidate.source.startswith("directional_spectrum"):
+        return bool(
+            candidate.pose_confidence >= config.min_pose_confidence
+            and (strong_edge_agreement or isolated_edge_agreement
+                 or orientation_verified or degraded_edge_agreement)
+        )
+    if candidate.source.startswith("orientation_nominal"):
         return bool(
             candidate.pose_confidence >= 0.15
-            and (strong_edge_agreement or isolated_edge_agreement)
+            and (strong_edge_agreement or isolated_edge_agreement
+                 or orientation_verified or degraded_edge_agreement)
         )
     return False
 
@@ -761,7 +894,8 @@ def _solve_edges_impl(
     nominal = _nominal_reference(reference_gray, config)
     local, local_diag = _descriptor_proposals(nominal, search_gray, config)
     spectral, spectral_diag = _spectral_proposals(nominal, search_gray, config)
-    proposals = _deduplicate_proposals(local + spectral, config)
+    proposals = _add_scale_boundary_proposals(
+        _deduplicate_proposals(local + spectral, config), config)
     base_diag.update(local_diag)
     base_diag.update(spectral_diag)
     base_diag["pose_proposals"] = [
@@ -794,40 +928,16 @@ def _solve_edges_impl(
     if not candidates:
         return _empty_result(search_gray.shape, "no_spatial_candidate", base_diag)
 
-    # Preserve spatial aliases from the geometrically strongest and nominal
-    # poses before taking one head from every other pose.  On a periodic field
-    # the best site at a scale that is still 10--20% wrong can be a remote
-    # lattice copy; continuous scale correction only helps the true site if
-    # that second/third spatial peak actually reaches the optimizer.
-    selected: list[_Candidate] = []
-    pose_heads: list[_Candidate] = []
-    for candidate in candidates:
-        if all(abs(candidate.scale - old.scale) >= 0.15
-               or abs(candidate.theta - old.theta) >= 0.35
-               for old in pose_heads):
-            pose_heads.append(candidate)
-    priority = [
-        item for source in ("descriptor_ransac", "directional_spectrum",
-                            "orientation_nominal")
-        for item in candidates if item.source == source
-    ]
-    ordered_candidates = (
-        priority + pose_heads
-        + [item for item in candidates if item not in priority and item not in pose_heads]
-    )
-    for candidate in ordered_candidates:
-        if all(np.hypot(candidate.x - old.x, candidate.y - old.y) >= 2.0
-               or abs(candidate.scale - old.scale) >= 0.15
-               or abs(candidate.theta - old.theta) >= 0.35
-               for old in selected):
-            selected.append(candidate)
-        if len(selected) >= config.max_refine_candidates:
-            break
+    # Preserve at least one spatially NMS-separated candidate from every pose
+    # before admitting second aliases.  This prevents a strong periodic mode
+    # from exhausting the fixed continuous-refinement budget.
+    selected = _select_refinement_candidates(candidates, config)
     refined = [_refine_candidate(
         reference_gray, template_source, search_gray, search_edge, item, config)
                for item in selected]
     refined.sort(
-        key=lambda item: item.correlation + 0.16 * item.pose_confidence,
+        key=lambda item: (item.correlation + 0.16 * item.pose_confidence
+                          + 0.08 * item.orientation_agreement),
         reverse=True,
     )
     best = refined[0]
@@ -850,6 +960,10 @@ def _solve_edges_impl(
         0.58 * corr_quality + 0.27 * pose_confidence + 0.15 * gap_quality,
         0.0, 1.0,
     ))
+    # Orientation is independent of gradient magnitude correlation and remains
+    # valid under contrast reversal.  Use it as a bounded confidence bonus;
+    # the existing correlation, pose, and source gates still own abstention.
+    score = float(np.clip(score + 0.08 * best.orientation_agreement, 0.0, 1.0))
     strong_isolated_edge = bool(correlation >= 0.58 and gap >= 0.10)
     source_verified = _source_verified(best, correlation, gap, config)
     found = bool(
@@ -872,6 +986,7 @@ def _solve_edges_impl(
             for item in refined[:8]
         ],
         "correlation_gap": float(gap),
+        "orientation_agreement": float(best.orientation_agreement),
         "strong_isolated_edge": strong_isolated_edge,
         "rejection_reason": None if found else "weak_edge_evidence",
     })
