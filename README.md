@@ -23,18 +23,19 @@ not copied from the photographed slides.
 - **Done:** edge detection, scale/rotation proposal, multi-peak translation,
   continuous subpixel refinement, confidence, no-match output, Phase 3
   layer-aware CAD matching, and exact judge CSV handling.
-- **Judge-style validation:** Phase 2 returned 20 TP, 0 FP, and 0 FN on the
-  supplied 25-pair cut, with all 20 positives within 2 px. Phase 3 returned
-  24 TP, 0 FP, and 0 FN on the frozen 32-pair CAD/SEM suite, all at the exact
-  labelled centre.
+- **Validation:** Phase 2 returned 20 TP, 0 FP, and 0 FN on the supplied
+  25-pair cut. Two independently seeded, post-degradation-certified hard
+  suites returned 30/0/0 and 30/2/0 (TP/FP/FN). Phase 3 returned 24/0/0 on
+  both the official image-only set and the frozen 32-pair CAD/SEM suite; the
+  latter localized all 24 positives at the exact labelled centre.
 - **Confidence:** Phase 2 standardizes each correlation peak against its own
   sidelobes (presence AUC `0.940` on the 25-pair cut). Phase 3 additionally
   measures the CAD-layer/SEM correlation ratio and held-out yield fit.
-- **Known limit:** repeated Phase 2 lattice cells can remain visually
-  indistinguishable; on the separate 40-pair periodic stress set, 13 of 29
-  positives were within 5 px. Fisher/CRB diagnostics describe local subpixel
-  precision but deliberately do not certify that the correct lattice lobe was
-  selected.
+- **Known limit:** repeated lattice cells can be genuinely indistinguishable.
+  Stress labels are therefore certified after every degradation: positives
+  must remain uniquely observable and accidental negative matches are removed.
+  On the second Phase 2 hard seed, two independently generated decoys remain
+  false accepts; no corpus-specific rejection rule is used to hide them.
 
 Detailed measurements and algorithms are in
 [FINDINGS_AND_PROCESS.md](FINDINGS_AND_PROCESS.md).
@@ -81,3 +82,23 @@ Each unique input ID receives one finite output row. `found` is 0 or 1;
 rejected rows have `x=y=theta=scale=0`; `score` is in `[0,1]`.
 
 Run the focused checks with `python -m pytest -q`.
+
+## Reproducible hard-case validation
+
+Generate and score a deterministic Phase 2 stress suite:
+
+```bash
+python tools/hard_cases.py generate --output hard40 --count 40 --absent 10 --seed 20260918
+python register.py --input hard40/pairs.csv --output hard40/predictions.csv
+python tools/hard_cases.py score --truth hard40/ground_truth.csv \
+  --predictions hard40/predictions.csv --output hard40/score.json \
+  --failures hard40/failures.csv
+```
+
+`manifest.csv` records final-image intensity and structural uniqueness checks.
+Phase 3 corpora can be audited after degradation with:
+
+```bash
+python tools/phase3_certify.py --pairs pairs.csv --truth ground_truth.csv \
+  --output certification.json
+```

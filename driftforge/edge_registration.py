@@ -10,8 +10,9 @@ The public :func:`solve_edges` path has three deliberately separate stages:
    retained, then the strongest few are refined continuously in
    ``(x, y, theta, scale)`` using sub-pixel patch sampling.
 
-There is intentionally no pose-grid correlation fallback.  When neither local
-nor spectral evidence supports a pose the solver abstains with finite values.
+The calibrated local/spectral path runs first.  Honest abstentions may invoke
+a bounded quarter-resolution pose bank; its shortlist must still pass the same
+full-resolution edge refinement and independent verification.
 All scales use the project convention: ``scale`` is the 8--12 down-scaling
 factor from Reference pixels to Search pixels, and ``theta`` is the angle
 accepted by :func:`driftforge.pose.build_template`.
@@ -76,6 +77,14 @@ class EdgeConfig:
     coarse_peaks_per_pose: int = 4
     coarse_downsample: int = 2
     coarse_blur_fraction: float = 0.035
+    # A tiny global bank is evaluated only at quarter resolution.  It supplies
+    # starting poses when periodic spectra select the wrong harmonic; every
+    # shortlisted pose is still verified on the full-resolution edge map.
+    global_pose_downsample: int = 4
+    global_pose_shortlist: int = 8
+    boundary_rescue_shortlist: int = 12
+    intensity_rank_weight: float = 0.0
+    boundary_rescue_only: bool = False
     # At least one site from every retained pose can reach continuous
     # refinement.  Otherwise several high harmonic aliases can fill a global
     # top-3 and prevent the nominal seed from ever correcting its scale.
@@ -136,6 +145,7 @@ class _PoseProposal:
     theta_uncertainty_deg: float = 0.0
     support: int = 0
     directional_diversity_deg: float = 0.0
+    photometric_margin: float = 0.0
 
 
 @dataclass
@@ -152,6 +162,7 @@ class _Candidate:
     intensity_correlation: float = -1.0
     orientation_agreement: float = 0.0
     peak_to_sidelobe: float = 0.0
+    photometric_margin: float = 0.0
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -509,6 +520,117 @@ def _add_scale_boundary_proposals(
     return expanded
 
 
+def _global_edge_pose_proposals(
+    reference_gray: np.ndarray,
+    search_gray: np.ndarray,
+    config: EdgeConfig,
+) -> tuple[list[_PoseProposal], dict[str, Any]]:
+    """Shortlist global similarity modes on a quarter-resolution edge map."""
+    if config.global_pose_shortlist <= 0:
+        return [], {"coarse_global_pose_peaks": [],
+                    "coarse_global_pose_surfaces": 0}
+    factor = max(2, int(config.global_pose_downsample))
+    search_edge = _edge_features(search_gray, config)
+    coarse_search = cv2.resize(
+        search_edge, None, fx=1.0/factor, fy=1.0/factor,
+        interpolation=cv2.INTER_AREA)
+    # Anti-alias once before rendering the small pose bank.  Five scales and
+    # five angles cover the disclosed industrial extension with only 25 tiny
+    # surfaces (roughly 128x128 for a 512px Search).
+    source = cv2.GaussianBlur(
+        reference_gray, (0, 0), 0.5*config.scale_min,
+        borderType=cv2.BORDER_REFLECT)
+    scales = np.linspace(config.scale_min, config.scale_max, 5)
+    angles = np.linspace(-config.rotation_limit_deg,
+                         config.rotation_limit_deg, 5)
+    ranked: list[tuple[float, _PoseProposal]] = []
+    for scale in scales:
+        for theta in angles:
+            full_template = _make_template(
+                source, float(scale), float(theta), config)
+            template = cv2.resize(
+                full_template, None, fx=1.0/factor, fy=1.0/factor,
+                interpolation=cv2.INTER_AREA)
+            if (min(template.shape) < 6
+                    or template.shape[0] >= coarse_search.shape[0]
+                    or template.shape[1] >= coarse_search.shape[1]
+                    or float(template.std()) < 1e-5):
+                continue
+            surface = cv2.matchTemplate(
+                coarse_search, template, cv2.TM_CCOEFF_NORMED)
+            _lo, peak, _lloc, location = cv2.minMaxLoc(surface)
+            x = location[0]*factor + (full_template.shape[1]-1.0)/2.0
+            y = location[1]*factor + (full_template.shape[0]-1.0)/2.0
+            ranked.append((float(peak), _PoseProposal(
+                scale=float(scale), theta=float(theta), confidence=0.12,
+                source="coarse_global_edge", x=float(x), y=float(y),
+                scale_uncertainty=0.5,
+                theta_uncertainty_deg=config.rotation_limit_deg/4.0,
+                support=int(template.size),
+            )))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    kept: list[_PoseProposal] = []
+    for _score, proposal in ranked:
+        if all(abs(proposal.scale-old.scale) >= 0.70
+               or abs(proposal.theta-old.theta) >= 2.0
+               or np.hypot(proposal.x-old.x, proposal.y-old.y) >= 8.0
+               for old in kept):
+            kept.append(proposal)
+        if len(kept) >= config.global_pose_shortlist:
+            break
+    return kept, {
+        "coarse_global_pose_peaks": [
+            {"scale": item.scale, "theta": item.theta,
+             "x": item.x, "y": item.y}
+            for item in kept
+        ],
+        "coarse_global_pose_surfaces": len(ranked),
+    }
+
+
+def _boundary_rescue_proposals(
+    reference_gray: np.ndarray,
+    search_gray: np.ndarray,
+    config: EdgeConfig,
+) -> list[_PoseProposal]:
+    if config.boundary_rescue_shortlist <= 0:
+        return []
+    from .boundary_proposals import boundary_pose_proposals
+
+    raw = boundary_pose_proposals(
+        reference_gray, search_gray,
+        shortlist=config.boundary_rescue_shortlist)
+    # A reflected finite-FOV hypothesis is deliberately only an alternate
+    # boundary model.  Require the physically usual constant-padding model
+    # to corroborate its location before it can trigger a rescue.  This
+    # prevents a reflected border from manufacturing a strong periodic SEM
+    # alias while retaining cases where both boundary models identify the
+    # same site (the pose can still come from the better reflected model).
+    constant_sites = [
+        item for item in raw
+        if (item.boundary == "constant" and item.score >= 0.22
+            and item.margin >= 0.09)
+    ]
+
+    def boundary_supported(item: Any) -> bool:
+        return (item.boundary == "constant"
+                or any(np.hypot(item.x-other.x, item.y-other.y) <= 4.0
+                       for other in constant_sites))
+
+    return [
+        _PoseProposal(
+            scale=item.scale, theta=item.theta, confidence=item.score,
+            source="boundary_intensity", x=item.x, y=item.y,
+            scale_uncertainty=0.7,
+            theta_uncertainty_deg=2.5,
+            support=1, photometric_margin=item.margin,
+        )
+        for item in raw
+        if (item.score >= 0.22 and item.margin >= 0.09
+            and boundary_supported(item))
+    ]
+
+
 def _warp_template_pixels(
     reference_gray: np.ndarray,
     scale: float,
@@ -628,8 +750,9 @@ def _spatial_candidates(
         surfaces += 1
         half_x = (template.shape[1] - 1.0) / 2.0
         half_y = (template.shape[0] - 1.0) / 2.0
-        peaks = _surface_peaks(surface, template.shape, config.peaks_per_pose,
-                               config.spatial_nms_fraction)
+        peaks = ([] if proposal.source == "boundary_intensity" else
+                 _surface_peaks(surface, template.shape, config.peaks_per_pose,
+                                config.spatial_nms_fraction))
         # Build an independent low-frequency proposal surface.  Smoothing at
         # a scale tied to template support preserves device boundaries while
         # suppressing fine periodic lines that otherwise occupy every retained
@@ -649,7 +772,8 @@ def _spatial_candidates(
             coarse_search = cv2.resize(
                 coarse_search, None, fx=1.0 / coarse_factor,
                 fy=1.0 / coarse_factor, interpolation=cv2.INTER_AREA)
-        if (coarse_template.shape[0] < coarse_search.shape[0]
+        if (proposal.source != "boundary_intensity"
+                and coarse_template.shape[0] < coarse_search.shape[0]
                 and coarse_template.shape[1] < coarse_search.shape[1]
                 and float(coarse_template.std()) >= 1e-5):
             coarse_surface = cv2.matchTemplate(
@@ -698,6 +822,7 @@ def _spatial_candidates(
                 inliers=proposal.inliers,
                 peak_to_sidelobe=_peak_to_sidelobe(
                     surface, row, col, guard_radius, surface_moments),
+                photometric_margin=proposal.photometric_margin,
             ))
     candidates.sort(
         key=lambda item: item.correlation + 0.16 * item.pose_confidence,
@@ -871,6 +996,7 @@ def _refine_candidate(
         intensity_correlation=intensity_correlation,
         orientation_agreement=orientation_agreement,
         peak_to_sidelobe=candidate.peak_to_sidelobe,
+        photometric_margin=candidate.photometric_margin,
     )
 
 
@@ -931,6 +1057,25 @@ def _source_verified(candidate: _Candidate, correlation: float, gap: float,
             and (strong_edge_agreement or isolated_edge_agreement
                  or orientation_verified or degraded_edge_agreement)
         )
+    if candidate.source == "coarse_global_edge":
+        photometric = abs(candidate.intensity_correlation)
+        return bool(
+            candidate.pose_confidence >= config.min_pose_confidence
+            and ((photometric >= 0.45 and gap >= 0.13)
+                 or (photometric >= 0.55
+                     and candidate.orientation_agreement >= 0.55
+                     and correlation >= 0.35)
+                 or (photometric >= 0.45
+                     and 0.35 <= correlation <= 0.50
+                     and gap >= 0.07
+                     and candidate.orientation_agreement >= 0.25))
+        )
+    if candidate.source == "boundary_intensity":
+        return bool(
+            candidate.pose_confidence >= 0.22
+            and candidate.photometric_margin >= 0.09
+            and correlation >= 0.15
+        )
     return False
 
 
@@ -989,12 +1134,27 @@ def _solve_edges_impl(
         return _empty_result(search_gray.shape, "insufficient_edge_energy", base_diag)
 
     nominal = _nominal_reference(reference_gray, config)
-    local, local_diag = _descriptor_proposals(nominal, search_gray, config)
-    spectral, spectral_diag = _spectral_proposals(nominal, search_gray, config)
+    if config.boundary_rescue_only:
+        local, spectral = [], []
+        local_diag = {"reference_keypoints": 0, "search_keypoints": 0,
+                      "descriptor_matches": 0, "ransac_proposals": 0}
+        spectral_diag = {"spectral_scale": config.nominal_scale,
+                         "spectral_theta": 0.0,
+                         "orientation_strength": 0.0,
+                         "spectral_confidence": 0.0,
+                         "directional_spectral_proposals": []}
+    else:
+        local, local_diag = _descriptor_proposals(nominal, search_gray, config)
+        spectral, spectral_diag = _spectral_proposals(nominal, search_gray, config)
+    global_edge, global_edge_diag = _global_edge_pose_proposals(
+        reference_gray, search_gray, config)
+    boundary = _boundary_rescue_proposals(reference_gray, search_gray, config)
     proposals = _add_scale_boundary_proposals(
         _deduplicate_proposals(local + spectral, config), config)
+    proposals += global_edge + boundary
     base_diag.update(local_diag)
     base_diag.update(spectral_diag)
+    base_diag.update(global_edge_diag)
     base_diag["pose_proposals"] = [
         {
             "scale": float(item.scale), "theta": float(item.theta),
@@ -1034,7 +1194,9 @@ def _solve_edges_impl(
                for item in selected]
     refined.sort(
         key=lambda item: (item.correlation + 0.16 * item.pose_confidence
-                          + 0.08 * item.orientation_agreement),
+                          + 0.08 * item.orientation_agreement
+                          + config.intensity_rank_weight
+                          * abs(item.intensity_correlation)),
         reverse=True,
     )
     best = refined[0]
@@ -1067,10 +1229,12 @@ def _solve_edges_impl(
     ))
     strong_isolated_edge = bool(correlation >= 0.58 and gap >= 0.10)
     source_verified = _source_verified(best, correlation, gap, config)
+    required_score = (0.10 if best.source == "boundary_intensity"
+                      else config.min_found_score)
     found = bool(
         correlation >= config.min_edge_correlation
         and pose_confidence >= config.min_pose_confidence
-        and score >= config.min_found_score
+        and score >= required_score
         and source_verified
     )
     # The Cramer--Rao diagnostic describes local jitter around the selected
@@ -1104,6 +1268,7 @@ def _solve_edges_impl(
         "correlation_gap": float(gap),
         "peak_to_sidelobe": float(best.peak_to_sidelobe),
         "orientation_agreement": float(best.orientation_agreement),
+        "intensity_correlation": float(best.intensity_correlation),
         "fisher": {
             "std_x_px": float(fisher.std_x),
             "std_y_px": float(fisher.std_y),
@@ -1145,7 +1310,34 @@ def solve_edges(
     the previous OpenCV setting is restored before returning.
     """
     with _opencv_budget(config):
-        return _solve_edges_impl(reference, search, config)
+        # Preserve the fast, calibrated local/spectral path exactly.  The
+        # global bank is a rescue for honest abstentions, never a competitor
+        # that may displace an already verified answer.
+        baseline_config = replace(
+            config, global_pose_shortlist=0, boundary_rescue_shortlist=0)
+        baseline = _solve_edges_impl(reference, search, baseline_config)
+        if (baseline.found or (config.global_pose_shortlist <= 0
+                              and config.boundary_rescue_shortlist <= 0)):
+            return baseline
+        edge_rescue_config = replace(
+            config, max_refine_candidates=max(config.max_refine_candidates, 16),
+            intensity_rank_weight=max(config.intensity_rank_weight, 0.12),
+            boundary_rescue_shortlist=0)
+        edge_rescue = _solve_edges_impl(reference, search, edge_rescue_config)
+        if edge_rescue.found:
+            edge_rescue.diagnostics["global_pose_rescue"] = True
+            return edge_rescue
+        if config.boundary_rescue_shortlist > 0:
+            boundary_config = replace(
+                config, global_pose_shortlist=0, boundary_rescue_only=True,
+                max_refine_candidates=max(config.max_refine_candidates,
+                                          config.boundary_rescue_shortlist))
+            boundary_rescue = _solve_edges_impl(
+                reference, search, boundary_config)
+            if boundary_rescue.found:
+                boundary_rescue.diagnostics["boundary_pose_rescue"] = True
+                return boundary_rescue
+        return baseline
 
 
 __all__ = ["EdgeConfig", "EdgeResult", "solve_edges"]

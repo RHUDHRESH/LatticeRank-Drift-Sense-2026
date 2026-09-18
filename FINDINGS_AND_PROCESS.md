@@ -6,6 +6,14 @@
 
 ## 1. Current status
 
+> **Validated head update (18 September 2026):** the measurements immediately
+> below supersede older experimental tables later in this development log.
+> Phase 2 official25 is 20 TP / 0 FP / 0 FN and 81.30/85 measured points.
+> Two post-degradation-certified industrial hard seeds score 30/0/0 and
+> 30/2/0 (TP/FP/FN), respectively. Phase 3 official25 is 24/0/0/1
+> (TP/FP/FN/TN), with all positives within 2 px; tough32 is 24/0/0/8 with all
+> positives exact. The repository test suite contains 58 passing tests.
+
 Both pipelines run end to end against the supplied organizer generators and
 produce the required CSV contract without reading withheld metadata.
 

@@ -678,8 +678,16 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
         found = int(best.geometry_support >= MIN_VECTOR_COVERAGE and
                     vector_coverage >= MIN_VECTOR_COVERAGE and sem_agrees)
     else:
-        found = int(best.fit >= 0.20 and best.edge_corr >= 0.06 and
-                    best.proposal >= 0.04)
+        # Image-only presence needs agreement from independent evidence
+        # families.  A flexible per-layer fit alone can explain an unrelated
+        # occurrence of a repeated process pattern, especially in a generated
+        # no-match pair from the same architecture.  The calibrated floors
+        # retain faint and non-monotonic real matches while rejecting those
+        # structurally plausible decoys.
+        found = int(best.fit >= 0.68 and best.edge_corr >= 0.42 and
+                    best.proposal >= 0.04 and
+                    (best.appearance_corr >= 0.67 or
+                     best.eta_squared >= 0.50))
     if not found:
         return {"x": 0.0, "y": 0.0, "theta": 0.0, "scale": 0.0,
                 "found": 0, "score": confidence}

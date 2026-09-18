@@ -15,6 +15,7 @@ from driftforge.edge_registration import (
     EdgeConfig,
     EdgeResult,
     _add_scale_boundary_proposals,
+    _global_edge_pose_proposals,
     _make_template,
     _peak_to_sidelobe,
     _polarity_insensitive_orientation_agreement,
@@ -348,3 +349,25 @@ def test_orientation_agreement_is_polarity_insensitive_and_discriminative() -> N
     assert same > 0.95
     assert opposite_polarity > 0.95
     assert different_orientation < 0.35
+
+
+def test_global_pose_rescue_requires_independent_fit_and_isolation() -> None:
+    candidate = _Candidate(
+        x=10.0, y=10.0, scale=10.0, theta=0.0,
+        correlation=0.62, pose_confidence=0.12,
+        source="coarse_global_edge", intensity_correlation=-0.70,
+    )
+    assert _source_verified(candidate, 0.62, 0.14, EdgeConfig())
+    assert not _source_verified(candidate, 0.62, 0.08, EdgeConfig())
+    candidate.intensity_correlation = 0.40
+    assert not _source_verified(candidate, 0.62, 0.20, EdgeConfig())
+
+
+def test_global_pose_bank_can_be_disabled_for_calibrated_first_pass() -> None:
+    proposals, diagnostics = _global_edge_pose_proposals(
+        np.zeros((128, 128), np.float32),
+        np.zeros((128, 128), np.float32),
+        EdgeConfig(global_pose_shortlist=0),
+    )
+    assert proposals == []
+    assert diagnostics["coarse_global_pose_surfaces"] == 0
