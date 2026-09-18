@@ -893,3 +893,107 @@ The remaining work before submission is release packaging and, if time allows,
 additional seed-based stress testing of Phase 3 absence rejection. Thresholds
 should not be tuned from the single absent seed-7 example without a broader
 negative set.
+
+## 15. Phase 2 photo and tile validation TODO
+
+The slide and WhatsApp photographs show the practical Phase 2 tile problem:
+a small, high-resolution SEM reference tile must be located inside a wider SEM
+search field containing repeated device structures and larger mat or separator
+boundaries. This photo-derived validation is a separate required workstream.
+
+### 15.1 Inventory the photographs
+
+1. Inspect all supplied images in chronological order.
+2. Mark which images contain a Phase 2 reference tile, a search image, a
+   reference/search example, a result overlay, or explanation only.
+3. Record the visible architecture, scale, rotation, boundary features, layer
+   visibility, and image-quality problems.
+4. Keep slide screenshots and phone-camera photographs distinct from original
+   raster datasets.
+
+### 15.2 Recover usable raster regions
+
+1. Crop away slide chrome, captions, borders, and unrelated panels.
+2. Correct camera perspective when a photograph was taken at an angle.
+3. Preserve the original aspect ratio and avoid rescaling more than necessary.
+4. Convert the recovered regions to one grayscale image plane.
+5. Record every crop and geometric correction so the experiment is
+   reproducible.
+
+### 15.3 Construct verified tile pairs
+
+For each usable example, create:
+
+```text
+pair_id
+reference_path
+search_path
+verified_center_x
+verified_center_y
+verification_method
+source_photo
+```
+
+Ground truth should come from an organizer label, an unambiguous visible box,
+or careful human verification. Images without trustworthy coordinates may be
+used for qualitative overlays but must not be included in numerical scoring.
+
+### 15.4 Run the complete Phase 2 pipeline
+
+Each recovered pair must pass through the same public inference path:
+
+```text
+load reference and search
+→ normalize image planes
+→ extract Scharr edges
+→ estimate rotation and scale
+→ warp the reference tile
+→ correlate against the search field
+→ preserve periodic alternatives
+→ refine x, y, theta, and scale continuously
+→ compute confidence and found/rejected state
+```
+
+No photo-specific coordinate, filename, or manually selected search window may
+be injected into the solver.
+
+### 15.5 Produce visual verification
+
+For every usable pair, generate a review overlay containing:
+
+- the complete search image;
+- the predicted reference footprint;
+- the verified footprint when available;
+- predicted center and verified center;
+- localization error in search pixels;
+- predicted scale and rotation;
+- confidence and found state;
+- the strongest remote runner-up when the layout is periodic.
+
+The overlay is for validation only and must remain outside the inference
+submission package.
+
+### 15.6 Photo/tile success gates
+
+The photo-derived tile workstream is complete when:
+
+1. Every supplied photograph has been classified.
+2. Every usable Phase 2 pair has a reproducible crop record.
+3. All pairs run through `register.py` without manual solver assistance.
+4. Quantitatively labelled pairs report localization, scale, and rotation
+   errors.
+5. Qualitative-only pairs have clear overlays and an explanation of any
+   ambiguity.
+6. Failures are separated into pose-proposal failure, wrong periodic tile,
+   subpixel-refinement failure, and presence-rejection failure.
+7. Improvements made for the photographs still pass the frozen official
+   25-pair judge set.
+
+### 15.7 Scoring boundary
+
+Photo and slide screenshots are valuable for understanding the real tile
+geometry, especially coarse mat and separator boundaries. Their results must
+be reported separately from official generator scores unless the original
+pixel data and trusted ground truth are available. This prevents screenshot
+compression, perspective correction, or manual cropping from inflating or
+reducing the reported judge score.
