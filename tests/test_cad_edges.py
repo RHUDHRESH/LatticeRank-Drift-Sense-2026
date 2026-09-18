@@ -11,6 +11,7 @@ import pytest
 import phase3
 from driftforge.cad_edges import (
     _cad_proposal_candidates,
+    _correlation_ratio,
     _vector_cad_proposal_candidates,
     load_layered_template,
     solve_cad_edges,
@@ -19,6 +20,14 @@ from driftforge.cadref import read_gds_geometry
 
 gdstk = pytest.importorskip("gdstk")
 cv2 = pytest.importorskip("cv2")
+
+
+def test_correlation_ratio_detects_cad_group_yield() -> None:
+    labels = np.repeat(np.arange(4, dtype=np.uint32), 64).reshape(16, 16)
+    structured = labels.astype(np.float32) * 0.25
+    flat = np.ones_like(structured)
+    assert _correlation_ratio(labels, structured) > 0.99
+    assert _correlation_ratio(labels, flat) == 0.0
 
 
 def _write_layout(path: Path, *, physical_units: bool = False) -> Path:

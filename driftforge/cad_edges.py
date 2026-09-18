@@ -32,6 +32,7 @@ class LayeredTemplate:
     regions: np.ndarray
     proposal_edges: np.ndarray
     appearance: np.ndarray
+    group_labels: np.ndarray
     size_nm: float
     unit_mode: str
 
@@ -44,6 +45,8 @@ class CandidateFit:
     intensity_corr: float
     edge_corr: float
     appearance_corr: float
+    eta_squared: float
+    yield_fit: float
     proposal: float
     geometry_support: float
     visible_layers: int
@@ -141,7 +144,9 @@ def load_layered_template(gds_path: str | Path, *, scale: float = NOMINAL_SCALE,
     for layer, coverage in zip(layer_ids, regions):
         intensity = 0.85 if num_layers <= 1 else 0.20 + 0.65 * layer / (num_layers - 1)
         appearance = appearance * (1.0 - coverage) + float(intensity) * coverage
+    group_labels = _layer_group_labels(regions)
     return LayeredTemplate(layer_ids, regions, proposals.astype(np.float32), appearance,
+                           group_labels,
                            REFERENCE_SIZE_NM, geometry.unit_mode)
 
 
@@ -429,6 +434,45 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(av, bv) / denominator) if denominator > 1e-12 else 0.0
 
 
+def _layer_group_labels(regions: np.ndarray) -> np.ndarray:
+    """Encode the CAD layer-membership group of every template pixel."""
+    labels = np.zeros(regions.shape[1:], dtype=np.uint32)
+    for index, region in enumerate(regions):
+        labels |= (np.asarray(region) >= 0.5).astype(np.uint32) << index
+    # Dense labels make repeated candidate evaluation a pair of bincounts,
+    # avoiding an np.unique sort for every integer/subpixel refinement.
+    _groups, dense = np.unique(labels, return_inverse=True)
+    return dense.reshape(labels.shape).astype(np.int32)
+
+
+def _correlation_ratio(labels: np.ndarray, values: np.ndarray) -> float:
+    """Return eta squared for a categorical CAD mask and SEM intensities.
+
+    This is a single bincount pass and therefore adds little cost compared
+    with the layer regression. Tiny antialiasing groups are folded out to
+    prevent one-pixel regions from producing an optimistic score.
+    """
+    inverse = np.asarray(labels, dtype=np.int64).ravel()
+    target = np.asarray(values, dtype=np.float64).ravel()
+    group_count = int(inverse.max()) + 1 if inverse.size else 0
+    if group_count < 2 or target.size == 0:
+        return 0.0
+    counts = np.bincount(inverse, minlength=group_count)
+    valid = counts >= max(4, target.size // 1000)
+    keep = valid[inverse]
+    if np.count_nonzero(keep) < 8 or np.count_nonzero(valid) < 2:
+        return 0.0
+    inverse = inverse[keep]
+    target = target[keep]
+    counts = np.bincount(inverse, minlength=group_count).astype(np.float64)
+    sums = np.bincount(inverse, weights=target, minlength=group_count)
+    nonzero = counts > 0
+    mean = float(target.mean())
+    between = float(np.sum(counts[nonzero] * (sums[nonzero] / counts[nonzero] - mean) ** 2))
+    total = float(np.sum((target - mean) ** 2))
+    return float(np.clip(between / total, 0.0, 1.0)) if total > 1e-12 else 0.0
+
+
 def _fit_candidate(search: np.ndarray, template: LayeredTemplate,
                    left: float, top: float, proposal: float,
                    geometry_support: float = 0.0) -> CandidateFit:
@@ -440,7 +484,7 @@ def _fit_candidate(search: np.ndarray, template: LayeredTemplate,
     useful = np.std(matrix, axis=0) > 2e-3
     matrix = matrix[:, useful]
     if matrix.shape[1] == 0:
-        return CandidateFit(left, top, 0.0, 0.0, 0.0, 0.0, proposal,
+        return CandidateFit(left, top, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, proposal,
                             geometry_support, 0)
 
     target = patch.ravel().astype(np.float64)
@@ -455,20 +499,36 @@ def _fit_candidate(search: np.ndarray, template: LayeredTemplate,
     predicted = (matrix @ beta).reshape(side, side).astype(np.float32)
     observed = target.reshape(side, side).astype(np.float32)
 
+    # Eta^2 measures whether CAD membership groups have distinct SEM yield,
+    # even when their ordering is not described well by one global contrast.
+    # The checkerboard holdout then asks whether the cheap linear layer model
+    # actually explains that yield instead of merely memorising group means.
+    eta_squared = _correlation_ratio(template.group_labels, observed)
+    holdout = ~train
+    holdout_target = target[holdout]
+    holdout_prediction = (matrix[holdout] @ beta)
+    holdout_total = float(np.sum((holdout_target - holdout_target.mean()) ** 2))
+    holdout_error = float(np.sum((holdout_target - holdout_prediction) ** 2))
+    linear_r2 = 1.0 - holdout_error / holdout_total if holdout_total > 1e-12 else 0.0
+    yield_fit = float(np.clip(linear_r2 / max(eta_squared, 0.05), 0.0, 1.0))
+
     intensity_corr = max(0.0, _cosine(predicted, observed))
     appearance = _detrend_plane(template.appearance)
     appearance_corr = max(0.0, _cosine(appearance, observed))
     pgx, pgy, _pm = _gradient(predicted)
     ogx, ogy, _om = _gradient(observed)
     edge_corr = max(0.0, _cosine(np.stack((pgx, pgy)), np.stack((ogx, ogy))))
-    fit = float(np.clip(0.62 * intensity_corr + 0.38 * edge_corr, 0.0, 1.0))
+    base_fit = 0.62 * intensity_corr + 0.38 * edge_corr
+    fit = float(np.clip(0.94 * base_fit +
+                        0.06 * eta_squared * yield_fit, 0.0, 1.0))
 
     feature_std = np.std(matrix, axis=0)
     effects = np.abs(beta) * feature_std
     threshold = max(float(np.std(target)) * 0.025, 1e-4)
     visible_layers = int(np.count_nonzero(effects > threshold))
     return CandidateFit(float(left), float(top), fit, intensity_corr,
-                        edge_corr, appearance_corr, float(proposal),
+                        edge_corr, appearance_corr, eta_squared, yield_fit,
+                        float(proposal),
                         float(geometry_support),
                         visible_layers)
 

@@ -23,15 +23,18 @@ not copied from the photographed slides.
 - **Done:** edge detection, scale/rotation proposal, multi-peak translation,
   continuous subpixel refinement, confidence, no-match output, Phase 3
   layer-aware CAD matching, and exact judge CSV handling.
-- **Working well:** zero execution failures on both 25-pair runs; Phase 2
-  measured subtotal `72.9838/85`; Phase 3 placed all 24 generated positives
-  within two pixels.
-- **Weak now:** Phase 2 harsh degradation can lose or reject correct
-  candidates; Phase 3 accepts difficult no-match pairs and its bounded vector
-  voting is biased by polygon traversal order.
-- **Next:** remove Phase 3 vote-order bias, add independent negative evidence,
-  fuse vector and image candidates, then improve Phase 2 candidate retention
-  and recalibrate confidence.
+- **Judge-style validation:** Phase 2 returned 20 TP, 0 FP, and 0 FN on the
+  supplied 25-pair cut, with all 20 positives within 2 px. Phase 3 returned
+  24 TP, 0 FP, and 0 FN on the frozen 32-pair CAD/SEM suite, all at the exact
+  labelled centre.
+- **Confidence:** Phase 2 standardizes each correlation peak against its own
+  sidelobes (presence AUC `0.940` on the 25-pair cut). Phase 3 additionally
+  measures the CAD-layer/SEM correlation ratio and held-out yield fit.
+- **Known limit:** repeated Phase 2 lattice cells can remain visually
+  indistinguishable; on the separate 40-pair periodic stress set, 13 of 29
+  positives were within 5 px. Fisher/CRB diagnostics describe local subpixel
+  precision but deliberately do not certify that the correct lattice lobe was
+  selected.
 
 Detailed measurements and algorithms are in
 [FINDINGS_AND_PROCESS.md](FINDINGS_AND_PROCESS.md).

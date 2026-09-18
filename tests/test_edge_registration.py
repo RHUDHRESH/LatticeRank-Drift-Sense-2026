@@ -16,6 +16,7 @@ from driftforge.edge_registration import (
     EdgeResult,
     _add_scale_boundary_proposals,
     _make_template,
+    _peak_to_sidelobe,
     _polarity_insensitive_orientation_agreement,
     _select_refinement_candidates,
     _source_verified,
@@ -104,6 +105,9 @@ def test_known_similarity_pose_is_localized_subpixel(
     assert result.edge_correlation > result.runner_up_correlation
     assert result.diagnostics["dense_pose_fallback"] is False
     assert result.diagnostics["correlation_surfaces"] <= EdgeConfig().max_pose_proposals
+    assert result.diagnostics["fisher"]["identifiable"]
+    assert np.isfinite(result.diagnostics["fisher"]["std_x_px"])
+    assert np.isfinite(result.diagnostics["fisher"]["std_y_px"])
 
 
 def test_flat_and_unrelated_pairs_abstain_with_finite_values() -> None:
@@ -154,6 +158,25 @@ def test_manual_paste_oracle_has_half_pixel_centre() -> None:
     assert value == pytest.approx(1.0, abs=1e-6)
     assert actual_x == expected_x
     assert actual_y == expected_y
+
+
+def test_peak_to_sidelobe_standardizes_against_off_peak_surface() -> None:
+    rng = np.random.default_rng(123)
+    surface = rng.normal(0.05, 0.02, (81, 93)).astype(np.float32)
+    surface[40, 46] = 0.45
+
+    psr = _peak_to_sidelobe(surface, 40, 46, guard_radius=4)
+
+    assert psr > 15.0
+    assert _peak_to_sidelobe(surface, 12, 17, guard_radius=4) < 3.0
+
+
+def test_peak_to_sidelobe_excludes_main_lobe_from_null_variance() -> None:
+    surface = np.zeros((61, 61), dtype=np.float32)
+    surface[27:34, 27:34] = 0.8
+    surface[30, 30] = 1.0
+
+    assert _peak_to_sidelobe(surface, 30, 30, guard_radius=4) == 20.0
 
 
 def test_refinement_admission_reserves_each_pose_before_more_aliases() -> None:

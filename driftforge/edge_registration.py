@@ -145,6 +145,7 @@ class _Candidate:
     inliers: int = 0
     intensity_correlation: float = -1.0
     orientation_agreement: float = 0.0
+    peak_to_sidelobe: float = 0.0
 
 
 def _as_gray(image: np.ndarray) -> np.ndarray:
@@ -564,6 +565,42 @@ def _surface_peaks(surface: np.ndarray, template_shape: tuple[int, int],
     return peaks
 
 
+def _peak_to_sidelobe(
+    surface: np.ndarray,
+    row: int,
+    col: int,
+    guard_radius: int,
+    moments: tuple[float, float] | None = None,
+) -> float:
+    """Standardize a correlation peak against its off-peak response map.
+
+    The response surface is already available, so this adds only two reductions
+    and a small guard-band sum.  Excluding the peak neighbourhood prevents the
+    target's main lobe from inflating its own null variance.
+    """
+    values = (np.nan_to_num(surface, nan=0.0, posinf=0.0, neginf=0.0)
+              if moments is None else surface)
+    count = int(values.size)
+    if moments is None:
+        total = float(values.sum())
+        total_sq = float(np.square(values).sum())
+    else:
+        total, total_sq = moments
+    y0, y1 = max(0, row - guard_radius), min(values.shape[0], row + guard_radius + 1)
+    x0, x1 = max(0, col - guard_radius), min(values.shape[1], col + guard_radius + 1)
+    guard = values[y0:y1, x0:x1]
+    count -= int(guard.size)
+    if count < 2:
+        return 0.0
+    total -= float(guard.sum())
+    total_sq -= float(np.square(guard).sum())
+    mean = total / count
+    variance = max(0.0, total_sq / count - mean * mean)
+    if variance <= 1e-12:
+        return 0.0
+    return float(np.clip((float(surface[row, col]) - mean) / np.sqrt(variance), 0.0, 20.0))
+
+
 def _spatial_candidates(
     template_source: np.ndarray,
     search_edge: np.ndarray,
@@ -587,6 +624,14 @@ def _spatial_candidates(
         half_y = (template.shape[0] - 1.0) / 2.0
         peaks = _surface_peaks(surface, template.shape, config.peaks_per_pose,
                                config.spatial_nms_fraction)
+        guard_radius = max(2, int(round(min(template.shape) * 0.16)))
+        surface_mean, surface_std = cv2.meanStdDev(surface)
+        mean_value = float(surface_mean[0, 0])
+        std_value = float(surface_std[0, 0])
+        surface_moments = (
+            mean_value * surface.size,
+            (std_value * std_value + mean_value * mean_value) * surface.size,
+        )
         # A RANSAC centre is valuable when repetition makes several correlation
         # peaks equivalent.  Add it explicitly, with its correlation sampled
         # from the same edge surface.
@@ -602,6 +647,8 @@ def _spatial_candidates(
                 correlation=float(value), pose_confidence=proposal.confidence,
                 source=proposal.source, matches=proposal.matches,
                 inliers=proposal.inliers,
+                peak_to_sidelobe=_peak_to_sidelobe(
+                    surface, row, col, guard_radius, surface_moments),
             ))
     candidates.sort(
         key=lambda item: item.correlation + 0.16 * item.pose_confidence,
@@ -774,6 +821,7 @@ def _refine_candidate(
         matches=candidate.matches, inliers=candidate.inliers,
         intensity_correlation=intensity_correlation,
         orientation_agreement=orientation_agreement,
+        peak_to_sidelobe=candidate.peak_to_sidelobe,
     )
 
 
@@ -956,14 +1004,18 @@ def _solve_edges_impl(
     corr_quality = float(np.clip((correlation - 0.10) / 0.55, 0.0, 1.0))
     gap_quality = float(np.clip(gap / 0.08, 0.0, 1.0))
     pose_confidence = float(np.clip(best.pose_confidence, 0.0, 1.0))
+    sidelobe_quality = float(np.clip(
+        (best.peak_to_sidelobe - 4.0) / 8.0, 0.0, 1.0))
+    # Peak height measures local fit, while the standardized peak measures how
+    # surprising that fit is for this image pair.  Keep margin, pose, and
+    # orientation evidence in the score so periodic aliases do not win merely
+    # by having a narrow response distribution.
     score = float(np.clip(
-        0.58 * corr_quality + 0.27 * pose_confidence + 0.15 * gap_quality,
+        0.30 * corr_quality + 0.20 * pose_confidence
+        + 0.15 * gap_quality + 0.20 * sidelobe_quality
+        + 0.15 * best.orientation_agreement,
         0.0, 1.0,
     ))
-    # Orientation is independent of gradient magnitude correlation and remains
-    # valid under contrast reversal.  Use it as a bounded confidence bonus;
-    # the existing correlation, pose, and source gates still own abstention.
-    score = float(np.clip(score + 0.08 * best.orientation_agreement, 0.0, 1.0))
     strong_isolated_edge = bool(correlation >= 0.58 and gap >= 0.10)
     source_verified = _source_verified(best, correlation, gap, config)
     found = bool(
@@ -972,6 +1024,21 @@ def _solve_edges_impl(
         and score >= config.min_found_score
         and source_verified
     )
+    # The Cramer--Rao diagnostic describes local jitter around the selected
+    # correlation lobe.  It is deliberately reported rather than blended into
+    # ``score``: a sharp but incorrect periodic alias can have excellent local
+    # Fisher information even though the global location is wrong.
+    from .fisher_confidence import fisher_confidence
+
+    fisher_shape = (
+        max(8, int(round(reference_gray.shape[0] / best.scale))),
+        max(8, int(round(reference_gray.shape[1] / best.scale))),
+    )
+    fisher_template = _warp_template_pixels(
+        template_source, best.scale, best.theta, fisher_shape, 1.0)
+    fisher_patch = cv2.getRectSubPix(
+        search_gray, (fisher_shape[1], fisher_shape[0]), (best.x, best.y))
+    fisher = fisher_confidence(fisher_template, fisher_patch)
     base_diag.update({
         "proposal_source": best.source,
         "descriptor_inliers": int(best.inliers),
@@ -986,7 +1053,18 @@ def _solve_edges_impl(
             for item in refined[:8]
         ],
         "correlation_gap": float(gap),
+        "peak_to_sidelobe": float(best.peak_to_sidelobe),
         "orientation_agreement": float(best.orientation_agreement),
+        "fisher": {
+            "std_x_px": float(fisher.std_x),
+            "std_y_px": float(fisher.std_y),
+            "std_rotation_deg": float(fisher.std_rotation_deg),
+            "std_log_scale": float(fisher.std_log_scale),
+            "noise_sigma": float(fisher.noise_sigma),
+            "effective_samples": float(fisher.effective_samples),
+            "confidence": float(fisher.confidence),
+            "identifiable": bool(fisher.identifiable),
+        },
         "strong_isolated_edge": strong_isolated_edge,
         "rejection_reason": None if found else "weak_edge_evidence",
     })
