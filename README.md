@@ -4,11 +4,21 @@ CPU-only edge registration for the SEMICON India hackathon.
 
 ## Project view
 
-| Phase 2: SEM → SEM | Phase 3: CAD → SEM |
+| GDS layer tiles | Merged CAD → yield → SEM |
 |---|---|
-| ![Phase 2 edge registration](assets/phase2-overview.svg) | ![Phase 3 CAD registration](assets/phase3-overview.svg) |
-| **Measured results** | **Work status** |
-| ![Measured results](assets/measured-results.svg) | ![Completed work and next fixes](assets/work-status.svg) |
+| ![Cumulative GDS layer tiles and full merged view](assets/gds-layer-stack.png) | ![Merged CAD, inferred yield raster, and SEM search](assets/cad-yield-sem.png) |
+| **Phase 2: SEM → SEM** | **Measured results** |
+| ![Phase 2 edge registration](assets/phase2-overview.svg) | ![Measured results](assets/measured-results.svg) |
+| **Completed and next** | |
+| ![Completed work and next fixes](assets/work-status.svg) | |
+
+The organizer's **tiles** are cumulative GDS layer views: layers 0–1,
+layers 0–3, layers 0–5, and finally all eight layers. The **merged view** is
+the complete stack of colored polygons. It has exact geometry and no image
+brightness or SEM noise. The solver then infers a grayscale layer appearance
+and registers that geometry against the supplied noisy SEM search. The two
+Phase 3 images above were generated from the supplied organizer generator,
+not copied from the photographed slides.
 
 - **Done:** edge detection, scale/rotation proposal, multi-peak translation,
   continuous subpixel refinement, confidence, no-match output, Phase 3
