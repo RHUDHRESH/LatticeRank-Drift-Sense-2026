@@ -499,9 +499,21 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
         return {"x": 0.0, "y": 0.0, "theta": 0.0, "scale": 0.0,
                 "found": 0, "score": 0.0}
 
-    order_value = lambda item: (0.58 * item.fit + 0.27 * item.appearance_corr +
-                                0.05 * item.proposal +
-                                0.10 * item.geometry_support)
+    if search_gds_path is not None:
+        # Exact design geometry is the strongest translation evidence when a
+        # legal search-side GDS is supplied. Appearance remains necessary for
+        # layer visibility and later presence rejection, but it must not let a
+        # photometrically convincing periodic alias displace a translation
+        # supported independently by the CAD polygons.
+        order_value = lambda item: (0.35 * item.fit +
+                                    0.10 * item.appearance_corr +
+                                    0.05 * item.proposal +
+                                    0.50 * item.geometry_support)
+    else:
+        order_value = lambda item: (0.58 * item.fit +
+                                    0.27 * item.appearance_corr +
+                                    0.05 * item.proposal +
+                                    0.10 * item.geometry_support)
     fitted.sort(key=order_value, reverse=True)
     refined = [_refine_candidate(search, template, item) for item in fitted[:3]]
     pool = refined + fitted[3:]
