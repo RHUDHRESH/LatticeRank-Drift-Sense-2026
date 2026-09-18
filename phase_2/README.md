@@ -2,8 +2,22 @@
 
 ## Run
 
+Install this phase only:
+
+```bash
+python -m pip install -r phase_2/requirements.txt
+```
+
+Run from the repository root:
+
 ```bash
 python phase_2/register.py --input pairs.csv --output predictions.csv
+```
+
+The equivalent command from inside `phase_2/` is:
+
+```bash
+python register.py --input pairs.csv --output predictions.csv
 ```
 
 Required input:
@@ -14,7 +28,7 @@ pair_id,search_path,reference_path
 
 Relative paths are resolved from the directory containing `pairs.csv`.
 
-![Phase 2 processing path](../assets/phase2-pipeline.svg)
+![Phase 2 processing path](assets/phase2-pipeline.svg)
 
 ## Inference path
 
@@ -54,7 +68,7 @@ Relative paths are resolved from the directory containing `pairs.csv`.
 
 ## Eyeball grid
 
-![Organizer Phase 2 cases labelled by scale, angle, severity and presence](../assets/phase2-parameter-grid.png)
+![Organizer Phase 2 cases labelled by scale, angle, severity and presence](assets/phase2-parameter-grid.png)
 
 The grid is a coverage view of organizer cases. It is documentation only and
 is never read during inference.

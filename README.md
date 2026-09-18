@@ -1,27 +1,20 @@
 # LatticeRank Drift-Sense
 
-CPU-only registration for the SEMICON India Phase 2 and Phase 3 tasks. The
-repository exposes each phase separately while retaining the original root
-entry points for judge compatibility.
+CPU-only registration for the SEMICON India Phase 2 and Phase 3 tasks. Each
+judge submission is self-contained in its own folder.
 
 | Task | Judge entry point | Input |
 |---|---|---|
 | [Phase 2: SEM → SEM](phase_2/README.md) | `python phase_2/register.py --input pairs.csv --output predictions.csv` | SEM reference and SEM search |
 | [Phase 3: CAD → SEM](phase_3/README.md) | `python phase_3/phase3.py --input pairs.csv --output predictions.csv` | reference GDS, search SEM, optional search GDS |
 
-The equivalent root commands remain available:
-
-```bash
-python register.py --input pairs.csv --output predictions.csv
-python phase3.py --input pairs.csv --output predictions.csv
-```
-
 ## Install
 
 Python 3.11 or newer is required.
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r phase_2/requirements.txt
+python -m pip install -r phase_3/requirements.txt
 ```
 
 Inference is offline. Native numerical libraries default to one CPU thread for
@@ -58,11 +51,29 @@ layer identity does not determine SEM brightness.
 
 ## Visual evidence
 
-| Cumulative GDS layer tiles | CAD → inferred layer appearance → SEM |
-|---|---|
-| ![Cumulative GDS tiles](assets/gds-layer-stack.png) | ![CAD and SEM merged view](assets/cad-yield-sem.png) |
-| Phase 2 parameter grid | Phase 3 distortion grid |
-| ![Phase 2 parameter grid](assets/phase2-parameter-grid.png) | ![Phase 3 parameter grid](assets/phase3-parameter-grid.png) |
+### Cumulative GDS layer tiles
+
+![Cumulative GDS tiles](phase_3/assets/gds-layer-stack.png)
+
+### CAD → inferred layer appearance → SEM
+
+![CAD and SEM merged view](phase_3/assets/cad-yield-sem.png)
+
+### Phase 2 organizer coverage
+
+![Phase 2 parameter grid](phase_2/assets/phase2-parameter-grid.png)
+
+Green cards are present references; red cards are true no-match cases. The
+bold band exposes scale, rotation and severity before the detailed acquisition
+and uniqueness measurements.
+
+### Phase 3 distortion coverage
+
+![Phase 3 parameter grid](phase_3/assets/phase3-parameter-grid.png)
+
+The bold band exposes the principal geometric and dose settings; the rows
+below it retain the remaining acquisition, noise, fabrication and layout
+parameters.
 
 Every grid tile is generated from the supplied organizer data or generator and
 prints the parameters needed to inspect that case. Only the rendered figures
@@ -88,19 +99,13 @@ structure; the solvers expose that ambiguity through `score` and may abstain.
 ## Repository map
 
 ```text
-phase_2/          Phase 2 entry point and technical notes
-phase_3/          Phase 3 entry point and technical notes
-driftforge/       Shared registration implementation
-assets/           Pipeline and parameter-sweep figures
-tests/            Contract and algorithm regression tests
-register.py       Root Phase 2 compatibility entry point
-phase3.py         Root Phase 3 compatibility entry point
+phase_2/          self-contained SEM-to-SEM submission
+phase_3/          self-contained CAD-to-SEM submission
 ```
 
 ## Verify
 
 ```bash
-python -m pytest -q
 python phase_2/register.py --help
 python phase_3/phase3.py --help
 ```

@@ -2,8 +2,22 @@
 
 ## Run
 
+Install this phase only:
+
+```bash
+python -m pip install -r phase_3/requirements.txt
+```
+
+Run from the repository root:
+
 ```bash
 python phase_3/phase3.py --input pairs.csv --output predictions.csv
+```
+
+The equivalent command from inside `phase_3/` is:
+
+```bash
+python phase3.py --input pairs.csv --output predictions.csv
 ```
 
 Blind input:
@@ -16,7 +30,7 @@ pair_id,search_path,reference_gds_path,search_gds_path,reference_sem_path,params
 never read during inference. `search_gds_path` is used when supplied and may be
 empty. Relative paths are resolved from the directory containing `pairs.csv`.
 
-![Phase 3 processing path](../assets/phase3-pipeline.svg)
+![Phase 3 processing path](assets/phase3-pipeline.svg)
 
 ## Inference path
 
@@ -52,13 +66,13 @@ empty. Relative paths are resolved from the directory containing `pairs.csv`.
 
 ## Layer tiles and parameter grid
 
-![Cumulative GDS layer tiles](../assets/gds-layer-stack.png)
+![Cumulative GDS layer tiles](assets/gds-layer-stack.png)
 
 The cumulative tiles show how individual masks merge into the eight-layer
 layout. The parameter grid below shows organizer-generator cases with the
 active acquisition and fabrication settings printed on each tile.
 
-![Phase 3 generator cases labelled by active parameters](../assets/phase3-parameter-grid.png)
+![Phase 3 generator cases labelled by active parameters](assets/phase3-parameter-grid.png)
 
 Only these rendered figures are included in the submission; the generator,
 bookmarks and ground truth are not shipped.
