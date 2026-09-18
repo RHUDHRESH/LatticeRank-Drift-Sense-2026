@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Judge-facing Phase 3 entry point using the tested root implementation."""
+
+from __future__ import annotations
+
+import runpy
+import sys
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+runpy.run_path(str(ROOT / "phase3.py"), run_name="__main__")

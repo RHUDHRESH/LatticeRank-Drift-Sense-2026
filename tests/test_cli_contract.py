@@ -54,3 +54,15 @@ def test_import_surface_has_no_training_stack() -> None:
             "assert not any(x == 'sklearn' or x.startswith('sklearn.') for x in sys.modules)")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stderr
+
+
+def test_judge_facing_phase_folders_expose_entry_points() -> None:
+    project = Path(__file__).resolve().parents[1]
+    for relative in ("phase_2/register.py", "phase_3/phase3.py"):
+        result = subprocess.run(
+            [sys.executable, str(project / relative), "--help"],
+            cwd=project, capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "--input" in result.stdout
+        assert "--output" in result.stdout
