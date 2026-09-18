@@ -87,6 +87,10 @@ def _assert_contract(result: EdgeResult, shape: tuple[int, int]) -> None:
     [
         (173.0, 296.0, 9.35, 2.4),
         (286.5, 181.5, 10.65, -3.1),
+        # Exact disclosed pose boundaries catch optimizers that silently
+        # exclude a closed interval endpoint or report the pre-warp centre.
+        (107.0, 110.0, 8.0, -10.0),
+        (371.0, 108.0, 12.0, 10.0),
     ],
 )
 def test_known_similarity_pose_is_localized_subpixel(

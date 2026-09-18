@@ -141,6 +141,34 @@ def test_unrelated_texture_is_rejected(tmp_path: Path) -> None:
     assert np.isfinite(float(result["score"]))
 
 
+def test_search_cad_does_not_override_unrelated_sem(tmp_path: Path) -> None:
+    """Exact design coincidence is only a proposal, not proof of SEM presence."""
+    gds_path = _write_layout(tmp_path / "layers.gds")
+    search_gds = _translate_reference_into_search_gds(
+        gds_path, tmp_path / "search.gds", 173.0, 247.0
+    )
+    noise = np.random.default_rng(912).integers(
+        0, 256, (520, 520), dtype=np.uint8
+    )
+    result = solve_cad_edges(gds_path, noise, search_gds_path=search_gds)
+    assert result["found"] == 0
+    assert result["scale"] == 0.0
+
+
+def test_search_cad_and_sem_must_agree_on_translation(tmp_path: Path) -> None:
+    gds_path = _write_layout(tmp_path / "layers.gds")
+    search_gds = _translate_reference_into_search_gds(
+        gds_path, tmp_path / "search.gds", 173.0, 247.0
+    )
+    # A visually excellent copy exists, but at a translation contradicted by
+    # the supplied full-scene design.  Neither channel should override the
+    # disagreement and publish a false location.
+    sem = _plant_layer(gds_path, 42.25, 75.5, layer=2, seed=93)
+    result = solve_cad_edges(gds_path, sem, search_gds_path=search_gds)
+    assert result["found"] == 0
+    assert result["scale"] == 0.0
+
+
 def test_auto_units_support_generator_and_physical_gds(tmp_path: Path) -> None:
     numeric = _write_layout(tmp_path / "numeric_nm.gds", physical_units=False)
     physical = _write_layout(tmp_path / "physical_um.gds", physical_units=True)

@@ -667,8 +667,16 @@ def _solve_cad_edges(gds_path: str | Path, search_image: np.ndarray, *,
         # low-dose or invisible-layer positives whose SEM appearance falls
         # below the image-only thresholds, while isolated polygon coincidences
         # remain below the existing 0.04 support floor.
+        # CAD establishes where a compatible design occurs, but it cannot
+        # establish that the SEM actually contains that crop.  Require a
+        # small amount of independent image evidence as a disagreement guard.
+        # The threshold is deliberately below the image-only gate so exact
+        # geometry can still recover low-dose and partly invisible layers.
+        sem_agrees = (best.fit >= 0.06 and
+                      (best.edge_corr >= 0.020 or
+                       (best.eta_squared >= 0.035 and best.yield_fit >= 0.10)))
         found = int(best.geometry_support >= MIN_VECTOR_COVERAGE and
-                    vector_coverage >= MIN_VECTOR_COVERAGE)
+                    vector_coverage >= MIN_VECTOR_COVERAGE and sem_agrees)
     else:
         found = int(best.fit >= 0.20 and best.edge_corr >= 0.06 and
                     best.proposal >= 0.04)
