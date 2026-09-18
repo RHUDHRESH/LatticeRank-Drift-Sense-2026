@@ -145,7 +145,7 @@ earned credit tier.
 All 11 checks pass:
 
 ```bash
-python ../tools/validate_submission.py --phase 2 --dataset <root>
+python register.py --input pairs.csv --output predictions.csv
 ```
 
 1. Phase folder is self-contained.

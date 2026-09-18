@@ -154,7 +154,7 @@ the set measured; they are not evidence of a rotation search.
 All 11 checks pass:
 
 ```bash
-python ../tools/validate_submission.py --phase 3 --dataset <root>
+python phase3.py --input pairs.csv --output predictions.csv
 ```
 
 - [x] Phase folder is self-contained

@@ -10,7 +10,4 @@ self-contained and carries its own README, requirements and tests.
 | **[Phase 3 — CAD to SEM](phase_3/README.md)** | `python phase3.py --input pairs.csv --output predictions.csv` |
 
 Both write `pair_id,x,y,theta,scale,found,score`, one row per `pair_id`.
-
-`tools/validate_submission.py` runs either phase the way the judges run it —
-blind split, no network, contract checked — and `tools/make_tiles.py` renders
-the per-case evidence tiles. No dataset is stored in this repository.
+No dataset is stored in this repository.
