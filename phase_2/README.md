@@ -73,6 +73,33 @@ Relative paths are resolved from the directory containing `pairs.csv`.
 The grid is a coverage view of organizer cases. It is documentation only and
 is never read during inference.
 
+## Judge-case result tiles
+
+Every result card follows the same visual grammar:
+
+- the large image is the **search SEM**;
+- the upper-right inset is the **reference tile**;
+- the cyan cross is **our predicted centre**;
+- the green ring is the **withheld ground-truth centre** used after inference;
+- the lower bands contain ground truth, prediction, confidence, localization
+  error, generator parameters and the inference path.
+
+### Set A — nominal present
+
+![Phase 2 Set A result tiles](assets/phase2-tiles-a.png)
+
+### Set B — degraded present
+
+![Phase 2 Set B result tiles](assets/phase2-tiles-b.png)
+
+### Set C — true no-match
+
+![Phase 2 Set C rejection tiles](assets/phase2-tiles-c.png)
+
+### Set D — optical/RGB bonus
+
+![Phase 2 Set D result tiles](assets/phase2-tiles-d.png)
+
 ## Output
 
 ```csv
@@ -81,3 +108,12 @@ pair_id,x,y,theta,scale,found,score
 
 `theta` is in degrees and `scale` is restricted to 8–12. Rejected pairs have
 zero pose values.
+
+## Tests
+
+This phase ships its own regression suite and no external data. Run it from
+inside this folder:
+
+```bash
+python -m pytest tests -q
+```

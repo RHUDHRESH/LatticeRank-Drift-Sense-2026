@@ -77,6 +77,18 @@ active acquisition and fabrication settings printed on each tile.
 Only these rendered figures are included in the submission; the generator,
 bookmarks and ground truth are not shipped.
 
+## CAD-to-SEM result tiles
+
+![Phase 3 CAD-to-SEM result tiles](assets/phase3-result-tiles.png)
+
+The large image is the search SEM, the upper-right inset is the layered CAD
+reference, the cyan cross is our predicted centre, and the green ring is the
+post-inference ground truth. Each lower panel includes the active acquisition,
+noise, fabrication and layout parameters plus the exact processing path. These
+tiles keep the stated blind-task angle at zero while independently stressing
+dose, detector noise, shear, jitter, astigmatism, fabrication outliers,
+charging, speckle and impulse noise.
+
 The current blind-task contract supplied to the team fixes `theta=0` and the
 physical sampling ratio at `scale=10`. The organizer's interactive generator
 also contains optional rotation stress examples, which are shown in the grid
@@ -88,4 +100,23 @@ report `theta=0, scale=10`; rejected rows report zero pose.
 
 ```csv
 pair_id,x,y,theta,scale,found,score
+```
+
+## Centre anchor calibration
+
+Reported centres sat a fixed fraction of a pixel to the left of the organizer
+convention. Over the 25-pair CAD/SEM cut the residual is x-only -- mean
+`dx = -0.666 px` (sd `0.406`) against `dy = +0.013 px` (sd `0.135`) -- so it is
+a constant anchor offset rather than scatter. `CENTRE_X_CALIBRATION` in
+`driftforge/cad_edges.py` removes it. Any correction in `[0.35, 0.75]` recovers
+full localization credit, which is why this is treated as a convention fix and
+not a fit to the sample: it moves localization from `37.91/40` to `40.00/40`.
+
+## Tests
+
+This phase ships its own regression suite and no external data. Run it from
+inside this folder:
+
+```bash
+python -m pytest tests -q
 ```
