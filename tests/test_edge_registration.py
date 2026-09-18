@@ -19,6 +19,7 @@ from driftforge.edge_registration import (
     _peak_to_sidelobe,
     _polarity_insensitive_orientation_agreement,
     _select_refinement_candidates,
+    _spatial_candidates,
     _source_verified,
     _surface_peaks,
     solve_edges,
@@ -181,6 +182,37 @@ def test_peak_to_sidelobe_excludes_main_lobe_from_null_variance() -> None:
     surface[30, 30] = 1.0
 
     assert _peak_to_sidelobe(surface, 30, 30, guard_radius=4) == 20.0
+
+
+def test_coarse_surface_recovers_broad_peak_omitted_by_fine_top_k() -> None:
+    """Low-frequency proposals survive dense high-frequency distractors."""
+    rng = np.random.default_rng(814)
+    template = np.zeros((48, 48), dtype=np.float32)
+    cv2.rectangle(template, (6, 8), (40, 37), 0.35, -1)
+    template += rng.normal(0.0, 0.16, template.shape).astype(np.float32)
+    search = rng.normal(0.0, 0.18, (180, 210)).astype(np.float32)
+    row, col = 93, 121
+    # Preserve the broad boundary but replace its fine texture, reproducing a
+    # target whose exact Scharr response ranks below narrow clutter aliases.
+    fine_template = _make_template(template, 1.0, 0.0, EdgeConfig())
+    broad = cv2.GaussianBlur(fine_template, (0, 0), 2.0)
+    search[row:row + 48, col:col + 48] += broad
+    # One sharp alias exhausts the deliberately one-peak fine budget.
+    search[18:66, 22:70] += fine_template
+    proposal = _PoseProposal(1.0, 0.0, 0.3, "test")
+    config = EdgeConfig(peaks_per_pose=1, coarse_peaks_per_pose=4)
+
+    fine_only, _ = _spatial_candidates(
+        template, search, [proposal],
+        EdgeConfig(peaks_per_pose=1, coarse_peaks_per_pose=0),
+    )
+    candidates, surfaces = _spatial_candidates(template, search, [proposal], config)
+
+    assert surfaces == 1
+    assert all(math.hypot(item.x - (col + 23.5), item.y - (row + 23.5)) >= 5.0
+               for item in fine_only)
+    assert any(math.hypot(item.x - (col + 23.5), item.y - (row + 23.5)) < 5.0
+               for item in candidates)
 
 
 def test_refinement_admission_reserves_each_pose_before_more_aliases() -> None:

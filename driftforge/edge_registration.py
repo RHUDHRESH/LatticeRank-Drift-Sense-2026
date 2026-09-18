@@ -70,6 +70,12 @@ class EdgeConfig:
     # downstream refinement budget remains fixed, so this increases proposal
     # recall without increasing the number of continuous optimizations.
     peaks_per_pose: int = 8
+    # A second, low-frequency surface proposes broad spatial modes that can be
+    # weak on the fine Scharr map under blur, charging and line dropout.  Its
+    # locations are always rescored on the original full-resolution surface.
+    coarse_peaks_per_pose: int = 4
+    coarse_downsample: int = 2
+    coarse_blur_fraction: float = 0.035
     # At least one site from every retained pose can reach continuous
     # refinement.  Otherwise several high harmonic aliases can fill a global
     # top-3 and prevent the nominal seed from ever correcting its scale.
@@ -624,6 +630,49 @@ def _spatial_candidates(
         half_y = (template.shape[0] - 1.0) / 2.0
         peaks = _surface_peaks(surface, template.shape, config.peaks_per_pose,
                                config.spatial_nms_fraction)
+        # Build an independent low-frequency proposal surface.  Smoothing at
+        # a scale tied to template support preserves device boundaries while
+        # suppressing fine periodic lines that otherwise occupy every retained
+        # peak.  Downsampling makes this stage cheap; proposed locations are
+        # converted back to the fine grid and scored by ``surface`` so coarse
+        # evidence can improve recall but cannot manufacture match quality.
+        coarse_factor = max(1, int(config.coarse_downsample))
+        coarse_sigma = max(0.8, min(template.shape) * config.coarse_blur_fraction)
+        coarse_template = cv2.GaussianBlur(
+            template, (0, 0), coarse_sigma, borderType=cv2.BORDER_REFLECT)
+        coarse_search = cv2.GaussianBlur(
+            search_edge, (0, 0), coarse_sigma, borderType=cv2.BORDER_REFLECT)
+        if coarse_factor > 1:
+            coarse_template = cv2.resize(
+                coarse_template, None, fx=1.0 / coarse_factor,
+                fy=1.0 / coarse_factor, interpolation=cv2.INTER_AREA)
+            coarse_search = cv2.resize(
+                coarse_search, None, fx=1.0 / coarse_factor,
+                fy=1.0 / coarse_factor, interpolation=cv2.INTER_AREA)
+        if (coarse_template.shape[0] < coarse_search.shape[0]
+                and coarse_template.shape[1] < coarse_search.shape[1]
+                and float(coarse_template.std()) >= 1e-5):
+            coarse_surface = cv2.matchTemplate(
+                coarse_search, coarse_template, cv2.TM_CCOEFF_NORMED)
+            coarse_peaks = _surface_peaks(
+                coarse_surface, coarse_template.shape,
+                config.coarse_peaks_per_pose, config.spatial_nms_fraction)
+            for _coarse_value, coarse_col, coarse_row in coarse_peaks:
+                col = int(np.clip(
+                    round(coarse_col * coarse_factor), 0, surface.shape[1] - 1))
+                row = int(np.clip(
+                    round(coarse_row * coarse_factor), 0, surface.shape[0] - 1))
+                # Snap within one coarse pixel to the best fine-grid response;
+                # this removes phase error introduced by area decimation.
+                radius = coarse_factor
+                y0, y1 = max(0, row - radius), min(surface.shape[0], row + radius + 1)
+                x0, x1 = max(0, col - radius), min(surface.shape[1], col + radius + 1)
+                _lo, value, _lloc, offset = cv2.minMaxLoc(surface[y0:y1, x0:x1])
+                fine_col, fine_row = x0 + offset[0], y0 + offset[1]
+                if all(np.hypot(fine_col - old_col, fine_row - old_row)
+                       >= max(2.0, min(template.shape) * 0.08)
+                    for _old_value, old_col, old_row in peaks):
+                    peaks.append((float(value), fine_col, fine_row))
         guard_radius = max(2, int(round(min(template.shape) * 0.16)))
         surface_mean, surface_std = cv2.meanStdDev(surface)
         mean_value = float(surface_mean[0, 0])
