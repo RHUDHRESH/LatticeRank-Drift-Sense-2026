@@ -997,3 +997,117 @@ be reported separately from official generator scores unless the original
 pixel data and trusted ground truth are available. This prevents screenshot
 compression, perspective correction, or manual cropping from inflating or
 reducing the reported judge score.
+
+## 16. Adversarial validation findings
+
+These results come from a separate deterministic stress suite. The suite is
+deliberately harsher than the frozen 25-pair judge run and is not an official
+competition score. It is designed to expose failure modes before submission.
+
+### 16.1 Phase 2 stress suite
+
+The Phase 2 suite contains 30 pairs: 20 present and 10 absent. Every present
+search image is degraded, the scale spans the required 8x to 12x range, the
+rotation spans -4.9 to +4.9 degrees, all 12 generator architectures appear,
+and all five severity levels appear. Four cases are RGB and one case is a
+clean 8x control. The blind CSV exposes paths only. A separate audit verified
+that every positive has a unique intended match in both intensity and edge
+space.
+
+The current solver completed all 30 cases without an execution or schema
+failure in 44.37 seconds (1.48 seconds per pair). Its stress score was
+**59.91/85**:
+
+- localization: 26.8/40;
+- scale: 6.9/10;
+- rotation: 7.0/10;
+- presence F1: 12.0/15 (14 TP, 1 FP, 6 FN; F1 0.800);
+- correctness AUC: 7.205/10.
+
+The score should be read as a diagnostic lower-bound test, not as a forecast
+of the official score. The strongest results were RGB handling and pose
+accuracy after the correct spatial candidate survived. The main weaknesses
+were:
+
+1. Two positives lost the correct spatial peak even though the correct scale
+   and rotation proposal existed. This is a candidate-recall and correlation
+   ranking failure.
+2. Four positives reached an internal location within 0.31 to 2.03 pixels of
+   ground truth but were rejected. This is confidence calibration and
+   acceptance gating, not subpixel localization.
+3. One hard negative was accepted.
+4. No severity-4 case was accepted, showing that the current threshold is too
+   brittle at the harshest degradation level.
+
+The organizer baseline on the same suite was slower (80 seconds), localized
+fewer positives, and achieved F1 0.765. The current solver is therefore a
+clear improvement, but it regressed on two specific pairs that the baseline
+accepted. Those pairs are the best immediate regression targets.
+
+### 16.2 Phase 3 stress suite
+
+The Phase 3 suite contains 32 zero-rotation, 10x cases: 16 DRAM and 16 FinFET,
+24 positives and 8 independently generated hard negatives. It covers first
+layer invisible, last layer invisible, both edge layers faint, inverted layer
+polarity, non-monotonic layer intensities, boundary placements, and three
+degradation tiers. The blind CSV was audited for label leakage and all
+positive labels were checked against the requested physical centers.
+
+With optional search GDS enabled, the current solver completed all cases in
+81.03 seconds. It produced 22 TP, 8 FP, and 2 FN (F1 0.815). Twelve of the 24
+positive cases were within one pixel; every successfully retained true vector
+vote was essentially exact. Without search GDS, runtime fell to 12.68 seconds
+but only 2 of 24 positives were within five pixels.
+
+The Phase 3 weaknesses are more serious than the Phase 2 weaknesses:
+
+1. All eight hard negatives were accepted. Search CAD currently improves
+   localization but provides no useful rejection evidence.
+2. The capped vector-voting traversal favors polygons encountered early.
+   Bottom placements succeeded on only 2 of 12 positives versus 10 of 12 for
+   top placements. This is an ordering bias, not a geometry limitation.
+3. Periodic aliases dominate when vector voting misses the true translation.
+   Image-only matching is especially vulnerable to invisible,
+   non-monotonic, and polarity-inverted layers.
+4. FinFET cases succeeded on 4 of 12 positives versus 8 of 12 DRAM cases.
+5. The vector path is about 6.4 times slower than the image-only path on this
+   suite and regressed one case that image matching placed within 2.38 pixels.
+
+The first Phase 3 fixes should therefore remove vector sampling order bias,
+add independent no-match evidence, and fuse vector and image candidates
+instead of allowing the vector path to replace a strong image result.
+
+### 16.3 Release priority from the stress tests
+
+The shortest path to a stronger submission is:
+
+1. Phase 3: sample vector features across the whole layout rather than taking
+   the first polygons up to the vote cap.
+2. Phase 3: require agreement between independent geometry and image evidence
+   before accepting a match, then calibrate on the eight hard negatives.
+3. Phase 3: retain both vector and image candidates through final scoring.
+4. Phase 2: retain more spatial peaks for correct pose proposals and improve
+   peak diversity across periodic cells.
+5. Phase 2: recalibrate acceptance using the four near-ground-truth false
+   rejections and the hard-negative false positive.
+6. Re-run the frozen official 25-pair suite after every change so stress-suite
+   gains cannot hide an official-set regression.
+
+## 17. Phase 2 frontend tile status
+
+- The intended tile is a frontend feature, not a presentation slide.
+- The 40 supplied photographs establish the visual concept: a small reference
+  tile shown against a much wider SEM search field. `14.38.30.jpeg` and
+  `14.38.31.jpeg` are the clearest examples.
+- The current public submission repository contains no frontend code or web
+  dependency. It contains only the Phase 2 and Phase 3 command-line solvers,
+  their shared modules, tests, and concise documentation.
+- The supplied generator archive has a separate Streamlit explorer, but the
+  photographs do not define a clickable Phase 2 tile, its text, its state, or
+  the action it should perform.
+- No guessed frontend framework or tile was added to the submission because
+  that would enlarge the judged package without a verified UI contract.
+- To implement the tile, the remaining concrete input is the target frontend
+  repository or file and the tile's click behavior. The registration result
+  data already available for the tile is: found state, x/y location, scale,
+  rotation, confidence, runtime, reference image, and search image.
